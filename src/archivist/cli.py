@@ -174,7 +174,7 @@ def _ingest_sqlite(filepath: Path, tracker: Tracker) -> int:
         tracker: Tracker instance for idempotency.
 
     Returns:
-        Number of vectors created (1).
+        Number of vectors created (1 if content, 0 if empty/skipped).
     """
     import hashlib
     import time
@@ -186,6 +186,11 @@ def _ingest_sqlite(filepath: Path, tracker: Tracker) -> int:
     raw = extract_text(filepath)
     display_text = normalize_for_display(raw)
     content = display_text[:50_000]  # FTS5 size limit
+
+    if not content.strip():
+        file_hash = hashlib.sha256(filepath.read_bytes()).hexdigest()
+        tracker.record(filepath, file_hash)
+        return 0
 
     from archivist.search.sqlite_search import SQLiteSearch
     sq = SQLiteSearch(settings.sqlite_db)
@@ -309,6 +314,10 @@ def clear(
     b["clear"]()
     b["close"]()
     import os
+    # Remove the search database
+    if os.path.exists(settings.sqlite_db):
+        os.remove(settings.sqlite_db)
+    # Remove the tracker database
     if os.path.exists(settings.tracker_db):
         os.remove(settings.tracker_db)
     console.print("[green]Database and tracker cleared.[/green]")
