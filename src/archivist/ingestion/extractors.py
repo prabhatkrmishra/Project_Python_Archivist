@@ -80,19 +80,29 @@ def normalize_text(text: str) -> str:
 def normalize_for_display(text: str) -> str:
     """Normalize text for display while preserving line structure and case.
 
-    Strips control characters, collapses spaces within lines, preserves
-    newlines for line-numbered snippet display. Keeps original case
-    for readable output.
+    Strips control characters, collapses multiple spaces to one within lines,
+    preserves newlines and leading indentation for line-numbered snippet display.
 
     Args:
         text: Raw text to normalize.
 
     Returns:
-        Normalized text with preserved line breaks and case.
+        Normalized text with preserved line breaks, indentation, and case.
     """
     text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", " ", text)
-    text = re.sub(r"[^\S\n]+", " ", text)  # Collapse spaces, keep newlines
-    text = re.sub(r"\n{3,}", "\n\n", text)  # Max 2 consecutive newlines
+    text = text.expandtabs(4)
+    # Process each line: preserve leading spaces, collapse internal spaces
+    lines = text.split("\n")
+    result = []
+    for line in lines:
+        # Match leading whitespace and the rest
+        m = re.match(r"^(\s*)(.*)", line)
+        if m:
+            leading = m.group(1)
+            rest = re.sub(r" {2,}", " ", m.group(2))
+            result.append(leading + rest)
+    text = "\n".join(result)
+    text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
 
