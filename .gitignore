@@ -10,6 +10,7 @@ build/
 eggs/
 *.whl
 pip-wheel-metadata/
+test_docs/
 
 # Virtual environments
 .venv/

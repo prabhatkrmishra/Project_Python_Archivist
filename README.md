@@ -7,7 +7,7 @@ Fully offline, CLI-first document search tool. Ingests 30+ file types — code, 
 - **Zero external services** — SQLite FTS5 backend runs entirely in-process
 - **Two backends** — SQLite FTS5 (default, fast) or Qdrant (vector search, optional)
 - **Persistent config** — `archivist use <backend>` saves your choice, no flags needed
-- **30+ file types** — code (.py, .js, .ts, .java, .c, .cpp, .go, .rs, etc.), docs (.pdf, .docx, .md, .txt), config (.json, .yaml, .toml, .xml)
+- **30+ file types** — code (.py, .js, .ts, .java, .c, .cpp, .go, .rs, etc.), docs (.pdf, .docx, .md, .txt), config (.json, .yaml, .toml, .xml), tabular (.csv, .tsv, .xls, .xlsx, .jsonl)
 - **Incremental ingestion** — SHA256 hash tracker skips already-indexed files
 - **Line-numbered output** — search results show `> L42: matching line` with context
 - **Large-file chunking** — PDFs split by page, DOCX by section, when >10MB / >100 pages
@@ -173,6 +173,9 @@ curl http://localhost:8000/health
    - **Text/code files** (.py, .js, .ts, .java, .c, .go, .rs, .md, .json, .yaml, etc.) — read as plain text
    - **PDFs** — text extracted page-by-page via pypdf
    - **DOCX** — text extracted paragraph-by-paragraph via python-docx
+   - **CSV/TSV** — auto-detect delimiter, flatten rows as "header: value | header: value"
+   - **Excel** (.xls/.xlsx) — extract each sheet, flatten rows with column names
+   - **JSONL** — parse each line as JSON, flatten nested objects with dot notation
    - Text is normalized (lowercased for vectorization, original case preserved for display).
 
 2. **Indexing** — SQLite FTS5 (default) creates an inverted index for fast keyword search. Alternatively, Qdrant stores sparse TF-IDF vectors with HNSW indexing.

@@ -64,6 +64,9 @@ Typer CLI entry point
 │       │       ├── ingestion/extractors.py:extract_text(filepath)
 │       │       │   ├── [if .pdf] extract_pdf(path)  → pypdf.PdfReader → page.extract_text()
 │       │       │   ├── [if .docx] extract_docx(path) → docx.Document → para.text
+│       │       │   ├── [if .csv/.tsv] extract_csv(path) → csv.reader → flatten rows as "header: value | header: value"
+│       │       │   ├── [if .xls/.xlsx] extract_excel(path) → openpyxl/xlrd → flatten rows per sheet
+│       │       │   ├── [if .jsonl] extract_jsonl(path) → json.loads per line → flatten with dot notation
 │       │       │   └── [else] extract_txt(path)      # All text/code files
 │       │       ├── ingestion/extractors.py:normalize_for_display(raw)
 │       │       │   ├── re.sub( control chars → " " )
@@ -248,7 +251,7 @@ Typer CLI entry point
 |------|---------|
 | `cli.py` | Typer CLI entry point, command routing, backend resolution |
 | `config.py` | Pydantic settings (env vars, defaults) |
-| `ingestion/extractors.py` | Text/code/PDF/DOCX extraction, normalization, chunking |
+| `ingestion/extractors.py` | Text/code/PDF/DOCX/CSV/Excel/JSONL extraction, normalization, chunking |
 | `ingestion/tracker.py` | SQLite SHA256 hash tracker for idempotency |
 | `ingestion/pipeline.py` | Qdrant ingestion orchestration |
 | `search/sqlite_search.py` | SQLite FTS5 backend (default) |
@@ -264,7 +267,15 @@ Typer CLI entry point
 ## Data Flow Diagram
 
 ```
-File → extract_text() → normalize_for_display() → SQLiteSearch.upsert()
+File → extract_text()
+  ├── .pdf  → extract_pdf()        → pypdf page-by-page text
+  ├── .docx → extract_docx()       → python-docx paragraph text
+  ├── .csv/.tsv → extract_csv()    → auto-detect delimiter → flatten "header: value | header: value"
+  ├── .xls/.xlsx → extract_excel() → openpyxl/xlrd → flatten rows per sheet
+  ├── .jsonl → extract_jsonl()     → json.loads per line → flatten nested with dot notation
+  └── .txt/.py/.js/... → extract_txt() → plain text read
+
+→ normalize_for_display() → SQLiteSearch.upsert()
                                                         ↓
                                               documents table (metadata)
                                               documents_fts table (FTS5 index)

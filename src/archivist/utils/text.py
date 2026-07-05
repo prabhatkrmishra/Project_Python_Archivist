@@ -9,10 +9,11 @@ import re
 
 
 def extract_snippet(content: str, query: str, context_lines: int = 3) -> str:
-    """Return a line-numbered snippet centered on the first query-term match.
+    """Return a line-numbered snippet centered on the best query-term match.
 
     Displays the matching line with a ► marker and surrounding context lines.
     Uses "..." to indicate omitted content at boundaries.
+    Prefers exact phrase matches over single-term matches.
 
     Args:
         content: Full document text.
@@ -35,14 +36,25 @@ def extract_snippet(content: str, query: str, context_lines: int = 3) -> str:
         shown = lines[: context_lines * 2 + 1]
         return "\n".join(f"  [green]L{i+1}[/green][orange]:[/orange] {l}" for i, l in enumerate(shown))
 
-    pattern = re.compile("|".join(terms), re.IGNORECASE)
+    # Build patterns: prefer exact phrase, fall back to any-term match
+    phrase_pattern = re.compile(" ".join(terms), re.IGNORECASE)
+    any_pattern = re.compile("|".join(terms), re.IGNORECASE)
 
     lines = content.splitlines()
     match_line_idx = None
+
+    # First pass: try exact phrase match
     for i, line in enumerate(lines):
-        if pattern.search(line):
+        if phrase_pattern.search(line):
             match_line_idx = i
             break
+
+    # Second pass: fall back to any-term match
+    if match_line_idx is None:
+        for i, line in enumerate(lines):
+            if any_pattern.search(line):
+                match_line_idx = i
+                break
 
     if match_line_idx is None:
         shown = lines[: context_lines * 2 + 1]
