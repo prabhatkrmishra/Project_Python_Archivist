@@ -162,7 +162,9 @@ class SQLiteSearch:
 
     @staticmethod
     def _escape_fts(query: str) -> str:
-        """Escape FTS5 special characters and build OR query.
+        """Escape FTS5 special characters and build phrase query.
+
+        Always treats the query as an exact phrase for precise results.
 
         Args:
             query: Raw search query.
@@ -170,7 +172,8 @@ class SQLiteSearch:
         Returns:
             FTS5-compatible query string.
         """
-        terms = [re.escape(t) for t in query.split() if t.strip()]
+        terms = [re.escape(t.lower()) for t in query.split() if t.strip()]
         if not terms:
             return '""'
-        return " OR ".join(terms)
+        # Always phrase search
+        return '"' + " ".join(terms) + '"'
