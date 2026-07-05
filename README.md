@@ -38,6 +38,21 @@ archivist use sqlite    # Fast, zero external services (default)
 archivist use qdrant    # Vector search, requires Qdrant server
 ```
 
+### Build distributable package
+
+```bash
+pip install build
+python -m build
+# Creates dist/archivist-0.1.0-py3-none-any.whl
+```
+
+### Install globally from wheel
+
+```bash
+pip install dist/archivist-0.1.0-py3-none-any.whl
+archivist --help
+```
+
 ### Ingest a directory
 
 ```bash
