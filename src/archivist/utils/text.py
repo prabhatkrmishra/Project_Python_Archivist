@@ -33,7 +33,7 @@ def extract_snippet(content: str, query: str, context_lines: int = 3) -> str:
     if not terms:
         lines = content.splitlines()
         shown = lines[: context_lines * 2 + 1]
-        return "\n".join(f"  L{i+1}: {l}" for i, l in enumerate(shown))
+        return "\n".join(f"  [green]L{i+1}[/green][orange]:[/orange] {l}" for i, l in enumerate(shown))
 
     pattern = re.compile("|".join(terms), re.IGNORECASE)
 
@@ -46,15 +46,18 @@ def extract_snippet(content: str, query: str, context_lines: int = 3) -> str:
 
     if match_line_idx is None:
         shown = lines[: context_lines * 2 + 1]
-        return "\n".join(f"  L{i+1}: {l}" for i, l in enumerate(shown))
+        return "\n".join(f"  [green]L{i+1}[/green][orange]:[/orange] {l}" for i, l in enumerate(shown))
 
     start = max(0, match_line_idx - context_lines)
     end = min(len(lines), match_line_idx + context_lines + 1)
 
     parts = []
     for i in range(start, end):
-        prefix = "> " if i == match_line_idx else "  "
-        parts.append(f"{prefix}L{i+1}: {lines[i]}")
+        if i == match_line_idx:
+            prefix = "[bright_cyan]> [/bright_cyan]"
+        else:
+            prefix = "  "
+        parts.append(f"{prefix}[green]L{i+1}[/green][orange]:[/orange] {lines[i]}")
 
     if start > 0:
         parts.insert(0, "  ...")
