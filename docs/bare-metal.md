@@ -22,7 +22,8 @@ sudo chown -R archivist:archivist /opt/archivist /var/lib/archivist /var/log/arc
 sudo -u archivist git clone <repo-url> /opt/archivist/app
 cd /opt/archivist/app
 sudo -u archivist python -m venv .venv
-sudo -u archivist .venv/bin/pip install -e ".[dev]"
+sudo -u archivist .venv/bin/pip install -r requirements.txt
+sudo -u archivist .venv/bin/pip install -e .
 
 # Select backend (persisted to ~/.config/archivist/backend)
 sudo -u archivist /opt/archivist/app/.venv/bin/archivist use sqlite
@@ -273,7 +274,8 @@ sudo systemctl start qdrant
 ```bash
 cd /opt/archivist/app
 sudo -u archivist git pull
-sudo -u archivist .venv/bin/pip install -e ".[dev]"
+sudo -u archivist .venv/bin/pip install -r requirements.txt
+sudo -u archivist .venv/bin/pip install -e .
 sudo systemctl restart archivist-api
 ```
 

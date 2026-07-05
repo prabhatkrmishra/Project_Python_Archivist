@@ -27,7 +27,8 @@ cd archivist
 python -m venv .venv
 .venv\Scripts\activate   # Windows
 # source .venv/bin/activate   # Linux/macOS
-pip install -e ".[dev]"
+pip install -r requirements.txt
+pip install -e .
 ```
 
 ### Select backend (once)
@@ -225,6 +226,8 @@ archivist/
 ├── docs/
 │   └── bare-metal.md        # Production deployment guide
 ├── pyproject.toml           # Dependencies and build config
+├── requirements.txt         # Runtime dependencies
+├── requirements-dev.txt     # Dev/test dependencies
 ├── WORKING.md               # Detailed function flow documentation
 └── README.md                # This file
 ```
@@ -243,6 +246,8 @@ archivist/
 ## Tests
 
 ```bash
+pip install -r requirements-dev.txt
+pip install -e .
 pytest tests/ -v
 ```
 
