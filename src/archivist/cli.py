@@ -1,12 +1,12 @@
 """Command-line interface for Archivist.
 
 Provides CLI commands for document ingestion, search, and management.
-Supports both SQLite FTS5 (default) and Qdrant backends via --backend flag
-or persistent config via 'archivist use <backend>'.
+Uses SQLite FTS5 as the default and only search backend.
 """
 
 from __future__ import annotations
 
+import hashlib
 import time
 from pathlib import Path
 
@@ -24,81 +24,23 @@ app = typer.Typer(help="Archivist -- offline document search")
 console = Console()
 settings = get_settings()
 
-# Backend config file
-_BACKEND_CONFIG = settings.config_dir / "backend"
 
-
-def _load_backend() -> str:
-    """Load saved backend from config file. Falls back to 'sqlite'."""
-    try:
-        if _BACKEND_CONFIG.exists():
-            value = _BACKEND_CONFIG.read_text(encoding="utf-8").strip()
-            if value in ("sqlite", "qdrant"):
-                return value
-    except Exception:
-        pass
-    return "sqlite"
-
-
-def _save_backend(backend: str) -> None:
-    """Persist backend choice to config file."""
-    _BACKEND_CONFIG.parent.mkdir(parents=True, exist_ok=True)
-    _BACKEND_CONFIG.write_text(backend, encoding="utf-8")
-
-
-def _resolve_backend(override: str | None) -> str:
-    """Resolve backend: explicit flag > saved config > default sqlite."""
-    if override:
-        if override not in ("sqlite", "qdrant"):
-            console.print(f"[red]Invalid backend: {override}. Use 'sqlite' or 'qdrant'.[/red]")
-            raise typer.Exit(1)
-        return override
-    return _load_backend()
-
-
-BACKEND_OPT = typer.Option(None, "--backend", "-b", help="Override saved backend (sqlite or qdrant)")
-
-
-def _get_backend(backend: str):
-    """Return the appropriate search backend.
-
-    Args:
-        backend: Backend name ('sqlite' or 'qdrant').
+def _get_backend():
+    """Return the SQLite search backend.
 
     Returns:
         Dictionary with search, delete, stats, clear, close methods.
     """
-    if backend == "qdrant":
-        from qdrant_client import QdrantClient
-        from archivist.search.qdrant_client import (
-            search as qdrant_search,
-            delete_points,
-            get_stats,
-        )
-        client = QdrantClient(url=str(settings.qdrant_url), api_key=settings.qdrant_api_key)
-        return {
-            "client": client,
-            "search": lambda q, limit=10: qdrant_search(
-                client, settings.qdrant_collection,
-                vectorize(q, use_bm25=settings.vectorizer_use_bm25),
-                limit=limit,
-            ),
-            "delete": lambda doc_id: delete_points(client, settings.qdrant_collection, [doc_id]),
-            "stats": lambda: get_stats(client, settings.qdrant_collection),
-            "clear": lambda: client.delete_collection(settings.qdrant_collection),
-            "close": client.close,
-        }
-    else:
-        from archivist.search.sqlite_search import SQLiteSearch
-        sq = SQLiteSearch(settings.sqlite_db)
-        return {
-            "client": sq,
-            "search": lambda q, limit=10: sq.search(q, limit=limit),
-            "delete": lambda doc_id: sq.delete(doc_id),
-            "stats": lambda: sq.stats(),
-            "clear": lambda: sq.delete_all(),
-            "close": sq.close,
-        }
+    from archivist.search.sqlite_search import SQLiteSearch
+    sq = SQLiteSearch(settings.sqlite_db)
+    return {
+        "client": sq,
+        "search": lambda q, limit=10: sq.search(q, limit=limit),
+        "delete": lambda doc_id: sq.delete(doc_id),
+        "stats": lambda: sq.stats(),
+        "clear": lambda: sq.delete_all(),
+        "close": sq.close,
+    }
 
 
 @app.command()
@@ -107,11 +49,8 @@ def ingest(
     recursive: bool = typer.Option(True, "--recursive/--no-recursive"),
     workers: int = typer.Option(settings.ingest_workers, "--workers", "-w"),
     chunk: bool = typer.Option(True, "--chunk/--no-chunk"),
-    bm25: bool = typer.Option(False, "--bm25", help="Use Qdrant native BM25 instead of HashingVectorizer"),
-    backend: str = BACKEND_OPT,
 ):
     """Ingest a file or directory into the vector store."""
-    backend = _resolve_backend(backend)
     root = Path(path).resolve()
     if not root.exists():
         console.print(f"[red]Path not found: {root}[/red]")
@@ -146,11 +85,7 @@ def ingest(
 
     for i, filepath in enumerate(new_files, 1):
         try:
-            if backend == "sqlite":
-                n = _ingest_sqlite(filepath, tracker)
-            else:
-                from archivist.ingestion.pipeline import ingest_file
-                n = ingest_file(filepath, tracker, use_bm25=bm25, chunk=chunk)
+            n = _ingest_sqlite(filepath, tracker)
             total_vectors += n
             console.print(f" [{i}/{total_new}] {filepath.name} -> {n} vectors")
             ingested += 1
@@ -176,7 +111,6 @@ def _ingest_sqlite(filepath: Path, tracker: Tracker) -> int:
     Returns:
         Number of vectors created (1 if content, 0 if empty/skipped).
     """
-    import hashlib
     import time
     from archivist.ingestion.extractors import extract_text
 
@@ -215,28 +149,12 @@ def search(
     query: str,
     top: int = typer.Option(10, "--top", "-n"),
     json_output: bool = typer.Option(False, "--json", "-j"),
-    backend: str = BACKEND_OPT,
 ):
     """Search ingested documents."""
-    backend = _resolve_backend(backend)
-    from archivist.vectorizer.hashing_tfidf import vectorize
-
-    if backend == "qdrant":
-        from qdrant_client import QdrantClient
-        from archivist.search.qdrant_client import search as qdrant_search
-        client = QdrantClient(url=str(settings.qdrant_url), api_key=settings.qdrant_api_key)
-        q_vec = vectorize(query, use_bm25=settings.vectorizer_use_bm25)
-        hits = qdrant_search(client, settings.qdrant_collection, q_vec, limit=top)
-        client.close()
-        results = [{"id": h.id, "filepath": h.payload.get("filepath", "unknown"),
-                     "filename": h.payload.get("filename", ""),
-                     "content": h.payload.get("content", ""),
-                     "score": round(h.score or 0.0, 4)} for h in hits]
-    else:
-        from archivist.search.sqlite_search import SQLiteSearch
-        sq = SQLiteSearch(settings.sqlite_db)
-        results = sq.search(query, limit=top)
-        sq.close()
+    from archivist.search.sqlite_search import SQLiteSearch
+    sq = SQLiteSearch(settings.sqlite_db)
+    results = sq.search(query, limit=top)
+    sq.close()
 
     if not results:
         console.print("[yellow]No results found.[/yellow]")
@@ -261,22 +179,12 @@ def search(
 
 
 @app.command()
-def status(
-    backend: str = BACKEND_OPT,
-):
+def status():
     """Show index statistics."""
-    backend = _resolve_backend(backend)
-    if backend == "qdrant":
-        from qdrant_client import QdrantClient
-        from archivist.search.qdrant_client import get_stats
-        client = QdrantClient(url=str(settings.qdrant_url), api_key=settings.qdrant_api_key)
-        stats = get_stats(client, settings.qdrant_collection)
-        client.close()
-    else:
-        from archivist.search.sqlite_search import SQLiteSearch
-        sq = SQLiteSearch(settings.sqlite_db)
-        stats = sq.stats()
-        sq.close()
+    from archivist.search.sqlite_search import SQLiteSearch
+    sq = SQLiteSearch(settings.sqlite_db)
+    stats = sq.stats()
+    sq.close()
 
     tracker = Tracker(settings.tracker_db)
     tracker_stats = tracker.stats()
@@ -291,11 +199,9 @@ def status(
 @app.command()
 def delete(
     doc_id: str,
-    backend: str = BACKEND_OPT,
 ):
     """Delete a document by ID."""
-    backend = _resolve_backend(backend)
-    b = _get_backend(backend)
+    b = _get_backend()
     b["delete"](doc_id)
     b["close"]()
     console.print(f"[green]Deleted: {doc_id}[/green]")
@@ -304,13 +210,11 @@ def delete(
 @app.command()
 def clear(
     confirm: bool = typer.Option(False, "--confirm", prompt="This will delete ALL indexed data. Continue?"),
-    backend: str = BACKEND_OPT,
 ):
     """Delete all vectors and reset the tracker. Use with caution."""
     if not confirm:
         raise typer.Abort()
-    backend = _resolve_backend(backend)
-    b = _get_backend(backend)
+    b = _get_backend()
     b["clear"]()
     b["close"]()
     import os
@@ -335,51 +239,6 @@ def reindex(
     if not confirm:
         raise typer.Abort()
     console.print("[yellow]Reindex not yet implemented -- clear and re-ingest.[/yellow]")
-
-
-@app.command()
-def use(
-    backend: str = typer.Argument(None, help="Backend to use: sqlite or qdrant"),
-):
-    """Select and persist the default search backend.
-
-    Without arguments, shows current backend and interactive selector.
-    With argument, sets the backend and saves to config.
-
-    Examples:
-        archivist use          # Show current + interactive picker
-        archivist use sqlite   # Set SQLite FTS5 as default
-        archivist use qdrant   # Set Qdrant as default
-    """
-    current = _load_backend()
-
-    if backend is None:
-        # Show current and let user pick
-        table = Table(title="Search Backends")
-        table.add_column("Backend", style="cyan")
-        table.add_column("Status", style="green")
-        table.add_column("Description")
-        table.add_row("sqlite", "[bold]ACTIVE[/bold]" if current == "sqlite" else "",
-                       "FTS5 keyword search, zero external services")
-        table.add_row("qdrant", "[bold]ACTIVE[/bold]" if current == "qdrant" else "",
-                       "Vector search, requires Qdrant server")
-        console.print(table)
-        console.print(f"\nCurrent: [bold]{current}[/bold]")
-        console.print("Use: archivist use <sqlite|qdrant>")
-        return
-
-    backend = backend.lower().strip()
-    if backend not in ("sqlite", "qdrant"):
-        console.print(f"[red]Invalid backend: '{backend}'. Must be 'sqlite' or 'qdrant'.[/red]")
-        raise typer.Exit(1)
-
-    if backend == current:
-        console.print(f"[yellow]Already using '{backend}'.[/yellow]")
-        return
-
-    _save_backend(backend)
-    console.print(f"[green]Backend changed: {current} -> {backend}[/green]")
-    console.print(f"Config saved to: {_BACKEND_CONFIG}")
 
 
 def _fmt_duration(seconds: float) -> str:

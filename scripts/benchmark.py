@@ -15,9 +15,7 @@ from archivist.config import get_settings
 from archivist.ingestion.extractors import iter_files
 from archivist.ingestion.pipeline import ingest_file
 from archivist.ingestion.tracker import Tracker
-from archivist.search.qdrant_client import search
-from archivist.vectorizer.hashing_tfidf import vectorize
-from qdrant_client import QdrantClient
+from archivist.search.sqlite_search import SQLiteSearch
 
 
 def generate_fake_docs(count: int, dest: Path) -> Path:
@@ -29,11 +27,6 @@ def generate_fake_docs(count: int, dest: Path) -> Path:
 
 def run_benchmark(n_docs: int, workers: int) -> None:
     settings = get_settings()
-    client = QdrantClient(url=str(settings.qdrant_url), api_key=settings.qdrant_api_key)
-    from archivist.search.qdrant_client import ensure_collection
-    ensure_collection(client, settings.qdrant_collection)
-    client.close()
-
     tracker = Tracker(settings.tracker_db)
 
     with tempfile.TemporaryDirectory() as td:
@@ -54,14 +47,13 @@ def run_benchmark(n_docs: int, workers: int) -> None:
         rate = len(files) / ingest_time
         print(f"Ingestion complete: {len(files)} docs in {ingest_time:.1f}s ({rate:.1f} docs/sec)")
 
-        client = QdrantClient(url=str(settings.qdrant_url), api_key=settings.qdrant_api_key)
-        q_vec = vectorize("topic about finance and budget")
+        sq = SQLiteSearch(settings.sqlite_db)
         t0 = time.time()
-        hits = search(client, settings.qdrant_collection, q_vec, limit=10)
+        results = sq.search("topic about finance and budget", limit=10)
         search_time = (time.time() - t0) * 1000
-        client.close()
+        sq.close()
         print(f"Search latency: {search_time:.1f}ms (top-10 returned)")
-        print(f"Top score: {hits[0].score:.4f}" if hits else "No results")
+        print(f"Top score: {results[0]['score']:.4f}" if results else "No results")
 
     tracker.close()
 

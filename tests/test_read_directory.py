@@ -15,11 +15,7 @@ from docx import Document as DocxDoc
 from archivist.ingestion.extractors import iter_files, SUPPORTED_EXTENSIONS
 from archivist.ingestion.pipeline import ingest_file
 from archivist.ingestion.tracker import Tracker
-from archivist.search.qdrant_client import ensure_collection
-from archivist.vectorizer.hashing_tfidf import vectorize
-from qdrant_client import QdrantClient
-
-COLLECTION = "archivist_docs"
+from archivist.search.sqlite_search import SQLiteSearch
 
 
 _MINIMAL_PDF = (
@@ -102,11 +98,7 @@ class TestTrackerSkip:
         tracker = Tracker(tmp_path / "t.db")
         f = tmp_path / "new.txt"
         f.write_text("content")
-        client = QdrantClient(path=str(tmp_path / "qdrant"), check_compatibility=False)
-        ensure_collection(client, COLLECTION)
-        ingest_file(f, tracker, chunk=False, client=client,
-                    qdrant_url=":memory:", qdrant_collection=COLLECTION)
-        client.close()
+        ingest_file(f, tracker, chunk=False)
         assert tracker.is_indexed(f)
         tracker.close()
 
@@ -114,27 +106,18 @@ class TestTrackerSkip:
         tracker = Tracker(tmp_path / "t.db")
         f = tmp_path / "new.txt"
         f.write_text("content")
-        client = QdrantClient(path=str(tmp_path / "qdrant"), check_compatibility=False)
-        ensure_collection(client, COLLECTION)
-        ingest_file(f, tracker, chunk=False, client=client,
-                    qdrant_url=":memory:", qdrant_collection=COLLECTION)
-        result = ingest_file(f, tracker, chunk=False, client=client,
-                             qdrant_url=":memory:", qdrant_collection=COLLECTION)
+        ingest_file(f, tracker, chunk=False)
+        result = ingest_file(f, tracker, chunk=False)
         assert result == 0
-        client.close()
         tracker.close()
 
     def test_tracker_stats_after_ingest(self, tmp_path: Path):
         tracker = Tracker(tmp_path / "t.db")
         f = tmp_path / "new.txt"
         f.write_text("content")
-        client = QdrantClient(path=str(tmp_path / "qdrant"), check_compatibility=False)
-        ensure_collection(client, COLLECTION)
-        ingest_file(f, tracker, chunk=False, client=client,
-                    qdrant_url=":memory:", qdrant_collection=COLLECTION)
+        ingest_file(f, tracker, chunk=False)
         stats = tracker.stats()
         assert stats["indexed_files"] >= 1
-        client.close()
         tracker.close()
 
 
@@ -162,7 +145,7 @@ class TestMempalaceLogic:
         _write_test_files(tmp_path)
         tracker = Tracker(tmp_path / "t.db")
         files = list(iter_files(tmp_path))
-        tracker.record(files[0], "dummy-id")
+        tracker.record(files[0])
         new_files = []
         skipped = 0
         for f in iter_files(tmp_path):
@@ -177,16 +160,13 @@ class TestMempalaceLogic:
     def test_ingest_returns_vector_count(self, tmp_path: Path):
         _write_test_files(tmp_path)
         tracker = Tracker(tmp_path / "t.db")
-        client = QdrantClient(path=str(tmp_path / "qdrant"), check_compatibility=False)
-        ensure_collection(client, COLLECTION)
         files = list(iter_files(tmp_path))
         total_vecs = 0
         for fp in files:
-            n = ingest_file(fp, tracker, chunk=False, client=client,
-                            qdrant_url=":memory:", qdrant_collection=COLLECTION)
+            n = ingest_file(fp, tracker, chunk=False)
             total_vecs += n
-        assert total_vecs >= 3
-        client.close()
+        # a.txt and c.docx have text; b.pdf is minimal with no extractable text
+        assert total_vecs >= 2
         tracker.close()
 
     def test_found_and_skip_labels_exist_in_logic(self, tmp_path: Path):
@@ -203,7 +183,7 @@ class TestMempalaceLogic:
         assert "Found:" in labels
         assert "Skip:" not in labels  # none indexed yet
         # After recording one:
-        tracker.record(files[0], "dummy-id")
+        tracker.record(files[0])
         labels2 = []
         for f in files:
             if tracker.is_indexed(f):

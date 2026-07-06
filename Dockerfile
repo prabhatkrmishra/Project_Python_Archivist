@@ -8,7 +8,6 @@ RUN pip install --no-cache-dir .
 
 COPY src/ src/
 
-ENV QDRANT_URL=http://qdrant:6333
 ENV DATA_DIR=/data
 ENV VECTORIZER_N_FEATURES=1048576
 

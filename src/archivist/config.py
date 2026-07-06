@@ -17,15 +17,11 @@ class Settings(BaseSettings):
     """Application settings with environment variable override support.
 
     All settings can be overridden via environment variables with the prefix
-    ARCHIVIST_ (e.g., ARCHIVIST_QDRANT_URL, ARCHIVIST_DATA_DIR).
+    ARCHIVIST_ (e.g., ARCHIVIST_DATA_DIR).
 
     Attributes:
-        qdrant_url: Qdrant server URL (for vector backend).
-        qdrant_api_key: Optional API key for Qdrant authentication.
-        qdrant_collection: Qdrant collection name.
         vectorizer_n_features: HashingVectorizer feature dimensions (2^20).
         vectorizer_norm: Vector normalization type (l2 recommended).
-        vectorizer_use_bm25: Use Qdrant native BM25 instead of HashingVectorizer.
         ingest_batch_size: Batch size for ingestion operations.
         ingest_workers: Number of parallel ingestion workers.
         ingest_recursive: Recursively scan directories.
@@ -46,15 +42,9 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # Qdrant Configuration
-    qdrant_url: str = "http://localhost:6333"
-    qdrant_api_key: str | None = None
-    qdrant_collection: str = "archivist_docs"
-
     # Vectorizer Configuration
     vectorizer_n_features: int = 1_048_576  # 2^20 dimensions
     vectorizer_norm: str = "l2"
-    vectorizer_use_bm25: bool = False
 
     # Ingestion Configuration
     ingest_batch_size: int = 100

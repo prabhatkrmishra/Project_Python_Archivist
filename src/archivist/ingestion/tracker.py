@@ -17,7 +17,6 @@ CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS files (
     file_hash       TEXT PRIMARY KEY,
     filepath        TEXT NOT NULL,
-    qdrant_point_id TEXT NOT NULL,
     file_size       INTEGER,
     modified        REAL,
     ingested        REAL DEFAULT (strftime('%s','now'))
@@ -30,7 +29,6 @@ class FileRecord(NamedTuple):
     """Represents an indexed file record."""
     file_hash: str
     filepath: str
-    qdrant_point_id: str
     file_size: int | None
     modified: float | None
     ingested: float | None
@@ -71,44 +69,29 @@ class Tracker:
         ).fetchone()
         return row is not None
 
-    def record(self, path: Path, qdrant_point_id: str) -> None:
+    def record(self, path: Path, file_hash: str | None = None) -> None:
         """Record a successfully ingested file.
 
         Args:
             path: Path to ingested file.
-            qdrant_point_id: Qdrant point ID for the indexed document.
+            file_hash: Optional pre-computed file hash.
         """
-        file_hash = _hash(path)
+        if file_hash is None:
+            file_hash = _hash(path)
         stat = path.stat()
         self._conn.execute(
             """INSERT OR REPLACE INTO files
-               (file_hash, filepath, qdrant_point_id, file_size, modified, ingested)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+               (file_hash, filepath, file_size, modified, ingested)
+               VALUES (?, ?, ?, ?, ?)""",
             (
                 file_hash,
                 str(path.resolve()),
-                qdrant_point_id,
                 stat.st_size,
                 stat.st_mtime,
                 time.time(),
             ),
         )
         self._conn.commit()
-
-    def get_point_id(self, path: Path) -> str | None:
-        """Retrieve Qdrant point ID for a file.
-
-        Args:
-            path: Path to file.
-
-        Returns:
-            Point ID string or None if not found.
-        """
-        row = self._conn.execute(
-            "SELECT qdrant_point_id FROM files WHERE filepath = ?",
-            (str(path.resolve()),),
-        ).fetchone()
-        return row[0] if row else None
 
     def stats(self) -> dict:
         """Get tracker statistics.
