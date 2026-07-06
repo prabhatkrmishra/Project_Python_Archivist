@@ -9,7 +9,7 @@ import re
 
 
 def extract_snippet(content: str, query: str, context_lines: int = 3,
-                     line_offset: int = 0) -> str:
+                     line_offset: int = 0, plain: bool = False) -> str:
     """Return a line-numbered snippet centered on the best query-term match.
 
     Displays the matching line with a ► marker and surrounding context lines.
@@ -21,6 +21,7 @@ def extract_snippet(content: str, query: str, context_lines: int = 3,
         query: User's search query.
         context_lines: Lines of context before and after the match.
         line_offset: Starting line number of this chunk in the original file.
+        plain: If True, return plain text without Rich markup.
 
     Returns:
         Multi-line snippet with absolute line numbers, e.g.:
@@ -36,6 +37,11 @@ def extract_snippet(content: str, query: str, context_lines: int = 3,
     if not terms:
         lines = content.splitlines()
         shown = lines[: context_lines * 2 + 1]
+        if plain:
+            return "\n".join(
+                f"  L{i + line_offset + 1}: {line}"
+                for i, line in enumerate(shown)
+            )
         return "\n".join(
             f"  [green]L{i + line_offset + 1}[/green][orange]:[/orange] {line}"
             for i, line in enumerate(shown)
@@ -63,6 +69,11 @@ def extract_snippet(content: str, query: str, context_lines: int = 3,
 
     if match_line_idx is None:
         shown = lines[: context_lines * 2 + 1]
+        if plain:
+            return "\n".join(
+                f"  L{i + line_offset + 1}: {line}"
+                for i, line in enumerate(shown)
+            )
         return "\n".join(
             f"  [green]L{i + line_offset + 1}[/green][orange]:[/orange] {line}"
             for i, line in enumerate(shown)
@@ -74,10 +85,13 @@ def extract_snippet(content: str, query: str, context_lines: int = 3,
     parts = []
     for i in range(start, end):
         if i == match_line_idx:
-            prefix = "[bright_cyan]> [/bright_cyan]"
+            prefix = "> " if plain else "[bright_cyan]> [/bright_cyan]"
         else:
             prefix = "  "
-        parts.append(f"{prefix}[green]L{i + line_offset + 1}[/green][orange]:[/orange] {lines[i]}")
+        if plain:
+            parts.append(f"{prefix}L{i + line_offset + 1}: {lines[i]}")
+        else:
+            parts.append(f"{prefix}[green]L{i + line_offset + 1}[/green][orange]:[/orange] {lines[i]}")
 
     if start > 0:
         parts.insert(0, "  ...")

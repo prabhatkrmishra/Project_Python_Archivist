@@ -7,6 +7,7 @@ Uses SQLite FTS5 as the default and only search backend.
 from __future__ import annotations
 
 import hashlib
+import json
 import time
 from pathlib import Path
 
@@ -48,15 +49,20 @@ def ingest(
     recursive: bool = typer.Option(True, "--recursive/--no-recursive"),
     workers: int = typer.Option(settings.ingest_workers, "--workers", "-w"),
     chunk: bool = typer.Option(True, "--chunk/--no-chunk"),
+    json_output: bool = typer.Option(False, "--json", "-j"),
 ):
     """Ingest a file or directory into the vector store."""
     root = Path(path).resolve()
     if not root.exists():
-        console.print(f"[red]Path not found: {root}[/red]")
+        if json_output:
+            typer.echo(json.dumps({"error": f"Path not found: {root}"}, indent=2))
+        else:
+            console.print(f"[red]Path not found: {root}[/red]")
         raise typer.Exit(1)
 
     tracker = Tracker(settings.tracker_db)
-    console.print(Panel(f"Ingesting: {root}", title="Archivist"))
+    if not json_output:
+        console.print(Panel(f"Ingesting: {root}", title="Archivist"))
 
     new_files: list[Path] = []
     skipped = 0
@@ -64,39 +70,69 @@ def ingest(
     for f in iter_files(root, recursive=recursive):
         try:
             if tracker.is_indexed(f):
-                console.print(f"Skip: {f.relative_to(root)}")
                 skipped += 1
                 continue
         except PermissionError:
-            console.print(f"Skip (locked): {f.relative_to(root)}")
             skipped += 1
             continue
         new_files.append(f)
-        console.print(f"Found: {f.relative_to(root)}")
 
     total_new = len(new_files)
-    console.print(f"Ingesting {total_new} files ({skipped} already indexed)...")
+    if not json_output:
+        console.print(f"Ingesting {total_new} files ({skipped} already indexed)...")
 
     ingested = 0
     total_vectors = 0
     errors = 0
+    files_detail = []
     start = time.time()
 
     for i, filepath in enumerate(new_files, 1):
         try:
             n = _ingest_sqlite(filepath, tracker)
             total_vectors += n
-            console.print(f" [{i}/{total_new}] {filepath.name} -> {n} vectors")
             ingested += 1
+            files_detail.append({
+                "file": str(filepath),
+                "name": filepath.name,
+                "vectors": n,
+                "status": "ok",
+            })
+            if not json_output:
+                console.print(f" [{i}/{total_new}] {filepath.name} -> {n} vectors")
         except Exception as e:
             errors += 1
-            console.print(f" [{i}/{total_new}] {filepath.name} ERR {e}")
+            files_detail.append({
+                "file": str(filepath),
+                "name": filepath.name,
+                "vectors": 0,
+                "status": "error",
+                "error": str(e),
+            })
+            if not json_output:
+                console.print(f" [{i}/{total_new}] {filepath.name} ERR {e}")
 
-    elapsed = _fmt_duration(time.time() - start)
-    console.print(
-        f"\n[green]Ingestion complete: {ingested} files -> {total_vectors} vectors in {elapsed}[/green]\n"
-        f"  ({skipped} already indexed, {errors} errors)"
-    )
+    elapsed = time.time() - start
+
+    if json_output:
+        output = {
+            "path": str(root),
+            "total_new": total_new,
+            "skipped": skipped,
+            "ingested": ingested,
+            "total_vectors": total_vectors,
+            "errors": errors,
+            "elapsed_seconds": round(elapsed, 2),
+            "files": files_detail,
+        }
+        typer.echo(json.dumps(output, indent=2, ensure_ascii=False))
+    else:
+        elapsed_fmt = _fmt_duration(elapsed)
+        console.print(
+            f"\n[green]Ingestion complete: {ingested} files -> {total_vectors} vectors in {elapsed_fmt}[/green]\n"
+            f"  ({skipped} already indexed, {errors} errors)"
+        )
+
     tracker.close()
 
 
@@ -181,6 +217,33 @@ def search(
     results = sq.search(query, limit=top, all_chunks=all_chunks)
     sq.close()
 
+    if json_output:
+        output = {
+            "query": query,
+            "total": len(results),
+            "all_chunks": all_chunks,
+            "results": [],
+        }
+        for i, hit in enumerate(results, 1):
+            content = hit.get("content", "")
+            line_offset = hit.get("line_offset", 0)
+            snippet = extract_snippet(content, query, line_offset=line_offset, plain=True)
+            filepath = hit.get("filepath", "unknown")
+            source = Path(filepath).name if filepath != "unknown" else "unknown"
+            score = hit.get("score", 0.0)
+            output["results"].append({
+                "rank": i,
+                "score": score,
+                "filepath": filepath,
+                "source": source,
+                "line_offset": line_offset,
+                "snippet": snippet,
+                "doc_id": hit.get("doc_id", ""),
+                "file_hash": hit.get("file_hash", ""),
+            })
+        typer.echo(json.dumps(output, indent=2, ensure_ascii=False))
+        raise typer.Exit(0)
+
     if not results:
         console.print("[yellow]No results found.[/yellow]")
         raise typer.Exit(0)
@@ -193,19 +256,15 @@ def search(
         source = Path(filepath).name if filepath != "unknown" else "unknown"
         score = hit.get("score", 0.0)
 
-        if json_output:
-            escaped = snippet.replace('"', '\\"').replace("\n", "\\n")
-            typer.echo(
-                f'{{"rank": {i}, "score": {score}, "filepath": "{filepath}", "source": "{source}", "snippet": "{escaped}"}}'
-            )
-        else:
-            console.print(f"\n[bold cyan][{i}][/bold cyan] [blue]{filepath}[/blue]")
-            console.print(f"[dim]Source: {source}  |  Match: score={score}[/dim]")
-            console.print(snippet)
+        console.print(f"\n[bold cyan][{i}][/bold cyan] [blue]{filepath}[/blue]")
+        console.print(f"[dim]Source: {source}  |  Match: score={score}[/dim]")
+        console.print(snippet)
 
 
 @app.command()
-def status():
+def status(
+    json_output: bool = typer.Option(False, "--json", "-j"),
+):
     """Show index statistics."""
     from archivist.search.sqlite_search import SQLiteSearch
     sq = SQLiteSearch(settings.sqlite_db)
@@ -215,6 +274,11 @@ def status():
     tracker = Tracker(settings.tracker_db)
     tracker_stats = tracker.stats()
     tracker.close()
+
+    if json_output:
+        output = {**stats, "tracker_files": tracker_stats["indexed_files"]}
+        typer.echo(json.dumps(output, indent=2, ensure_ascii=False))
+        raise typer.Exit(0)
 
     console.print("[bold]Index status:[/bold]")
     for k, v in stats.items():
