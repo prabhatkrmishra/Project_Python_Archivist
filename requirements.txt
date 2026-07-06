@@ -13,3 +13,5 @@ xxhash>=3.4.0
 rich>=13.7.0
 openpyxl>=3.1.0
 xlrd>=2.0.0
+py7zr>=1.1.0
+rarfile>=4.2

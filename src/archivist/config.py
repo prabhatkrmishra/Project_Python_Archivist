@@ -59,6 +59,8 @@ class Settings(BaseSettings):
     api_port: int = 8000
     api_workers: int = 4
     api_key: str | None = None  # None = no authentication
+    api_max_upload_mb: int = 50  # Max upload size in MB
+    api_max_archive_files: int = 1000  # Max files per archive
 
     # Storage Paths
     data_dir: Path = Path.home() / ".local" / "share" / "archivist"

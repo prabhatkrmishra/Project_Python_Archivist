@@ -1,55 +1,205 @@
 """API route handlers for Archivist.
 
 FastAPI endpoints for document ingestion, search, and management.
+Supports single file, multi-file, archive (zip/rar/7z), and directory ingestion.
 """
 
 from __future__ import annotations
 
+import hashlib
+import logging
+import os
+import shutil
+import tempfile
 import time
 from pathlib import Path
 
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 
 from archivist.config import get_settings
-from archivist.ingestion.extractors import normalize_for_display
+from archivist.ingestion.extractors import iter_files, normalize_for_display
 from archivist.ingestion.tracker import Tracker
 from archivist.search.sqlite_search import SQLiteSearch
 from archivist.utils.text import extract_snippet
+
+from .archives import ArchiveError, extract_archive, is_archive
+from .schemas import (
+    DocumentInfo,
+    DocumentsResponse,
+    ErrorResponse,
+    IngestedFile,
+    IngestResponse,
+    SearchResult,
+    SearchResponse,
+    StatusResponse,
+)
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1", tags=["archivist"])
 settings = get_settings()
 
 
-@router.get("/search")
+def _get_max_bytes() -> int:
+    """Return max upload size in bytes."""
+    return settings.api_max_upload_mb * 1024 * 1024
+
+
+def _ingest_single_file(
+    filepath: Path, tracker: Tracker
+) -> IngestedFile:
+    """Ingest a single file through the proper pipeline.
+
+    Args:
+        filepath: Path to file to ingest.
+        tracker: Tracker instance for idempotency.
+
+    Returns:
+        IngestedFile with status details.
+    """
+    try:
+        if tracker.is_indexed(filepath):
+            return IngestedFile(
+                filename=filepath.name, status="skipped", vectors=0
+            )
+
+        raw = filepath.read_bytes()
+        text = raw.decode("utf-8", errors="replace")
+        display_text = normalize_for_display(text)
+
+        if not display_text.strip():
+            file_hash = hashlib.sha256(raw).hexdigest()
+            tracker.record(filepath, file_hash)
+            return IngestedFile(
+                filename=filepath.name, status="skipped", vectors=0
+            )
+
+        from archivist.ingestion.extractors import (
+            chunk_text,
+            extract_text,
+            should_chunk,
+        )
+
+        file_hash = hashlib.sha256(raw).hexdigest()
+
+        sq = SQLiteSearch(settings.sqlite_db)
+        sq.delete_by_file_hash(file_hash)
+
+        if should_chunk(filepath, display_text):
+            chunks = chunk_text(filepath, display_text)
+        else:
+            chunks = [display_text]
+
+        timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        stat = filepath.stat()
+
+        for i, chunk_content in enumerate(chunks):
+            doc_id = f"{file_hash}_{i:04d}"
+            line_offset = i * 1500
+            sq.upsert({
+                "doc_id": doc_id,
+                "filepath": str(filepath),
+                "filename": filepath.name,
+                "content": chunk_content,
+                "line_offset": line_offset,
+                "file_size": stat.st_size,
+                "modified_at": time.strftime(
+                    "%Y-%m-%dT%H:%M:%SZ", time.gmtime(stat.st_mtime)
+                ),
+                "ingested_at": timestamp,
+                "file_hash": file_hash,
+            })
+
+        sq.close()
+        tracker.record(filepath, file_hash)
+        return IngestedFile(
+            filename=filepath.name, status="ok", vectors=len(chunks)
+        )
+
+    except Exception as e:
+        logger.error(f"Ingest failed for {filepath}: {e}")
+        return IngestedFile(
+            filename=filepath.name, status="error", vectors=0, error=str(e)
+        )
+
+
+# ── Search ────────────────────────────────────────────────────────────────────
+
+
+@router.get(
+    "/search",
+    response_model=SearchResponse,
+    responses={400: {"model": ErrorResponse}},
+)
 async def search(
     q: str = Query(..., description="Search query"),
     size: int = Query(10, ge=1, le=100, description="Number of results"),
+    offset: int = Query(0, ge=0, description="Result offset for pagination"),
+    all_chunks: bool = Query(False, description="Return all matching chunks"),
+    file_ext: str | None = Query(None, description="Filter by file extension (e.g., .py)"),
+    min_score: float = Query(0.0, ge=0.0, le=1.0, description="Minimum relevance score"),
+    content_preview: bool = Query(False, description="Include first 500 chars of raw content"),
 ):
-    """Search ingested documents.
-
-    Returns documents matching the query with relevance scores.
-    """
+    """Search ingested documents with pagination and filters."""
     sq = SQLiteSearch(settings.sqlite_db)
     try:
-        results = sq.search(q, limit=size)
+        results = sq.search(q, limit=offset + size, all_chunks=all_chunks)
     finally:
         sq.close()
 
-    return {
-        "query": q,
-        "results": [
-            {
-                "id": r["id"],
-                "filepath": r["filepath"],
-                "score": r["score"],
-                "snippet": extract_snippet(r["content"], q),
-            }
-            for r in results
-        ],
-    }
+    # Apply filters
+    filtered = []
+    for r in results:
+        if file_ext:
+            ext = Path(r.get("filepath", "")).suffix.lower()
+            if ext != file_ext.lower():
+                continue
+        score = r.get("score", 0.0)
+        if score < min_score:
+            continue
+        filtered.append(r)
+
+    total = len(filtered)
+    page = filtered[offset : offset + size]
+
+    search_results = []
+    for i, r in enumerate(page, offset + 1):
+        content = r.get("content", "")
+        line_offset = r.get("line_offset", 0)
+        snippet = extract_snippet(content, q, line_offset=line_offset, plain=True)
+        filepath = r.get("filepath", "unknown")
+        source = Path(filepath).name if filepath != "unknown" else "unknown"
+
+        search_results.append(SearchResult(
+            rank=i,
+            score=r.get("score", 0.0),
+            filepath=filepath,
+            source=source,
+            filename=source,
+            line_offset=line_offset,
+            snippet=snippet,
+            content_preview=content[:500] if content_preview else "",
+            doc_id=r.get("doc_id", ""),
+            file_hash=r.get("file_hash", ""),
+            file_size=r.get("file_size", 0),
+            modified_at=r.get("modified_at", ""),
+            ingested_at=r.get("ingested_at", ""),
+        ))
+
+    return SearchResponse(
+        query=q,
+        total=total,
+        offset=offset,
+        limit=size,
+        all_chunks=all_chunks,
+        results=search_results,
+    )
 
 
-@router.get("/status")
+# ── Status ────────────────────────────────────────────────────────────────────
+
+
+@router.get("/status", response_model=StatusResponse)
 async def status():
     """Get index statistics."""
     sq = SQLiteSearch(settings.sqlite_db)
@@ -62,38 +212,335 @@ async def status():
     tracker_stats = tracker.stats()
     tracker.close()
 
-    return {**stats, **tracker_stats}
+    db_size = 0
+    if settings.sqlite_db.exists():
+        db_size = settings.sqlite_db.stat().st_size
+
+    return StatusResponse(
+        points_count=stats.get("points_count", 0),
+        backend=stats.get("backend", "unknown"),
+        tracker_files=tracker_stats.get("indexed_files", 0),
+        db_size_bytes=db_size,
+    )
 
 
-@router.post("/ingest/file")
+# ── Ingest: Single File ──────────────────────────────────────────────────────
+
+
+@router.post(
+    "/ingest/file",
+    response_model=IngestResponse,
+    responses={400: {"model": ErrorResponse}, 413: {"model": ErrorResponse}},
+)
 async def ingest_file(file: UploadFile = File(...)):
-    """Ingest a single file."""
+    """Ingest a single file through the extraction pipeline."""
     content = await file.read()
-    text = content.decode("utf-8", errors="replace")
+    if len(content) > _get_max_bytes():
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large. Max size: {settings.api_max_upload_mb}MB",
+        )
 
+    # Save to temp file so we can use the proper pipeline
+    tmp_dir = Path(tempfile.mkdtemp(prefix="archivist_upload_"))
+    try:
+        filename = file.filename or "unknown.txt"
+        filepath = tmp_dir / filename
+        filepath.write_bytes(content)
+
+        tracker = Tracker(settings.tracker_db)
+        start = time.time()
+        result = _ingest_single_file(filepath, tracker)
+        elapsed = time.time() - start
+        tracker.close()
+
+        return IngestResponse(
+            status="ok",
+            total_files=1,
+            total_vectors=result.vectors,
+            elapsed_seconds=round(elapsed, 3),
+            files=[result],
+        )
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+# ── Ingest: Multi-File ───────────────────────────────────────────────────────
+
+
+@router.post(
+    "/ingest/files",
+    response_model=IngestResponse,
+    responses={400: {"model": ErrorResponse}, 413: {"model": ErrorResponse}},
+)
+async def ingest_files(files: list[UploadFile] = File(...)):
+    """Ingest multiple files through the extraction pipeline."""
+    if not files:
+        raise HTTPException(status_code=400, detail="No files provided")
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="archivist_upload_"))
+    try:
+        tracker = Tracker(settings.tracker_db)
+        start = time.time()
+        results: list[IngestedFile] = []
+
+        for f in files:
+            content = await f.read()
+            if len(content) > _get_max_bytes():
+                results.append(IngestedFile(
+                    filename=f.filename or "unknown",
+                    status="error",
+                    vectors=0,
+                    error=f"File too large. Max: {settings.api_max_upload_mb}MB",
+                ))
+                continue
+
+            filename = f.filename or "unknown.txt"
+            filepath = tmp_dir / filename
+            filepath.write_bytes(content)
+            result = _ingest_single_file(filepath, tracker)
+            results.append(result)
+            filepath.unlink(missing_ok=True)
+
+        elapsed = time.time() - start
+        tracker.close()
+
+        total_vectors = sum(r.vectors for r in results)
+        return IngestResponse(
+            status="ok",
+            total_files=len(results),
+            total_vectors=total_vectors,
+            elapsed_seconds=round(elapsed, 3),
+            files=results,
+        )
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+# ── Ingest: Archive ──────────────────────────────────────────────────────────
+
+
+@router.post(
+    "/ingest/archive",
+    response_model=IngestResponse,
+    responses={
+        400: {"model": ErrorResponse},
+        413: {"model": ErrorResponse},
+        422: {"model": ErrorResponse},
+    },
+)
+async def ingest_archive(file: UploadFile = File(...)):
+    """Ingest an archive (zip, rar, 7z). Extracts and ingests each file."""
+    content = await file.read()
+    if len(content) > _get_max_bytes():
+        raise HTTPException(
+            status_code=413,
+            detail=f"Archive too large. Max size: {settings.api_max_upload_mb}MB",
+        )
+
+    filename = file.filename or "archive.zip"
+    tmp_dir = Path(tempfile.mkdtemp(prefix="archivist_archive_"))
+    try:
+        try:
+            extracted_files = extract_archive(content, filename, dest=tmp_dir)
+        except ArchiveError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+        if not extracted_files:
+            return IngestResponse(
+                status="ok",
+                total_files=0,
+                total_vectors=0,
+                elapsed_seconds=0.0,
+                files=[],
+            )
+
+        tracker = Tracker(settings.tracker_db)
+        start = time.time()
+        results: list[IngestedFile] = []
+
+        for filepath in extracted_files:
+            result = _ingest_single_file(filepath, tracker)
+            results.append(result)
+
+        elapsed = time.time() - start
+        tracker.close()
+
+        total_vectors = sum(r.vectors for r in results)
+        return IngestResponse(
+            status="ok",
+            total_files=len(results),
+            total_vectors=total_vectors,
+            elapsed_seconds=round(elapsed, 3),
+            files=results,
+        )
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+# ── Ingest: Directory ────────────────────────────────────────────────────────
+
+
+@router.post(
+    "/ingest/directory",
+    response_model=IngestResponse,
+    responses={400: {"model": ErrorResponse}, 404: {"model": ErrorResponse}},
+)
+async def ingest_directory(body: dict):
+    """Ingest all files from a local directory path."""
+    path_str = body.get("path", "")
+    recursive = body.get("recursive", True)
+
+    if not path_str:
+        raise HTTPException(status_code=400, detail="path is required")
+
+    root = Path(path_str).resolve()
+    if not root.exists():
+        raise HTTPException(status_code=404, detail=f"Directory not found: {root}")
+    if not root.is_dir():
+        raise HTTPException(status_code=400, detail=f"Not a directory: {root}")
+
+    tracker = Tracker(settings.tracker_db)
+    start = time.time()
+    results: list[IngestedFile] = []
+
+    for filepath in iter_files(root, recursive=recursive):
+        result = _ingest_single_file(filepath, tracker)
+        results.append(result)
+
+    elapsed = time.time() - start
+    tracker.close()
+
+    total_vectors = sum(r.vectors for r in results)
+    return IngestResponse(
+        status="ok",
+        total_files=len(results),
+        total_vectors=total_vectors,
+        elapsed_seconds=round(elapsed, 3),
+        files=results,
+    )
+
+
+# ── Documents ─────────────────────────────────────────────────────────────────
+
+
+@router.get(
+    "/documents",
+    response_model=DocumentsResponse,
+    responses={400: {"model": ErrorResponse}},
+)
+async def list_documents(
+    offset: int = Query(0, ge=0, description="Offset for pagination"),
+    limit: int = Query(50, ge=1, le=200, description="Max results"),
+    file_hash: str | None = Query(None, description="Filter by file hash"),
+    file_ext: str | None = Query(None, description="Filter by file extension"),
+):
+    """List all ingested documents with pagination."""
     sq = SQLiteSearch(settings.sqlite_db)
     try:
-        sq.upsert({
-            "filepath": file.filename or "unknown",
-            "filename": file.filename or "unknown",
-            "content": normalize_for_display(text)[:50_000],
-            "file_size": len(content),
-            "modified_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "ingested_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "file_hash": "",
-        })
+        rows = sq.conn.execute(
+            """SELECT doc_id, filepath, filename, line_offset,
+                      file_size, modified_at, ingested_at, file_hash
+               FROM documents
+               ORDER BY ingested_at DESC"""
+        ).fetchall()
     finally:
         sq.close()
 
-    return {"status": "ok", "filename": file.filename}
+    # Apply filters
+    filtered = []
+    for row in rows:
+        if file_hash and row[7] != file_hash:
+            continue
+        if file_ext:
+            ext = Path(row[1]).suffix.lower()
+            if ext != file_ext.lower():
+                continue
+        filtered.append(row)
+
+    total = len(filtered)
+    page = filtered[offset : offset + limit]
+
+    documents = [
+        DocumentInfo(
+            doc_id=r[0],
+            filepath=r[1],
+            filename=r[2],
+            line_offset=r[3],
+            file_size=r[4],
+            modified_at=r[5],
+            ingested_at=r[6],
+            file_hash=r[7],
+        )
+        for r in page
+    ]
+
+    return DocumentsResponse(
+        total=total, offset=offset, limit=limit, documents=documents
+    )
 
 
-@router.delete("/documents/{doc_id}")
+@router.get(
+    "/documents/{doc_id}",
+    response_model=DocumentInfo,
+    responses={404: {"model": ErrorResponse}},
+)
+async def get_document(doc_id: str):
+    """Get a single document by ID."""
+    sq = SQLiteSearch(settings.sqlite_db)
+    try:
+        row = sq.conn.execute(
+            """SELECT doc_id, filepath, filename, line_offset,
+                      file_size, modified_at, ingested_at, file_hash
+               FROM documents WHERE doc_id = ?""",
+            (doc_id,),
+        ).fetchone()
+    finally:
+        sq.close()
+
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Document not found: {doc_id}")
+
+    return DocumentInfo(
+        doc_id=row[0],
+        filepath=row[1],
+        filename=row[2],
+        line_offset=row[3],
+        file_size=row[4],
+        modified_at=row[5],
+        ingested_at=row[6],
+        file_hash=row[7],
+    )
+
+
+# ── Delete ────────────────────────────────────────────────────────────────────
+
+
+@router.delete(
+    "/documents/{doc_id}",
+    responses={200: {"description": "Deleted"}},
+)
 async def delete_document(doc_id: str):
-    """Delete a document by ID."""
+    """Delete a document by its ID."""
     sq = SQLiteSearch(settings.sqlite_db)
     try:
         sq.delete(doc_id)
     finally:
         sq.close()
     return {"status": "deleted", "id": doc_id}
+
+
+@router.delete(
+    "/documents",
+    responses={200: {"description": "Deleted by file hash"}},
+)
+async def delete_documents_by_hash(
+    file_hash: str = Query(..., description="File hash to delete all chunks for"),
+):
+    """Delete all document chunks for a given file hash."""
+    sq = SQLiteSearch(settings.sqlite_db)
+    try:
+        sq.delete_by_file_hash(file_hash)
+    finally:
+        sq.close()
+    return {"status": "deleted", "file_hash": file_hash}
