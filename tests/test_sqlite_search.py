@@ -18,6 +18,7 @@ def tmp_db(tmp_path: Path):
 def test_upsert_and_search(tmp_db: Path):
     sq = SQLiteSearch(tmp_db)
     sq.upsert({
+        "doc_id": "report_0000",
         "filepath": "/docs/report.txt",
         "filename": "report.txt",
         "content": "quarterly budget analysis shows revenue growth",
@@ -29,6 +30,7 @@ def test_upsert_and_search(tmp_db: Path):
     results = sq.search("budget")
     assert len(results) == 1
     assert results[0]["filepath"] == "/docs/report.txt"
+    assert results[0]["doc_id"] == "report_0000"
     assert results[0]["score"] >= 0
     sq.close()
 
@@ -36,6 +38,7 @@ def test_upsert_and_search(tmp_db: Path):
 def test_search_no_match(tmp_db: Path):
     sq = SQLiteSearch(tmp_db)
     sq.upsert({
+        "doc_id": "a_0000",
         "filepath": "/docs/a.txt",
         "filename": "a.txt",
         "content": "hello world",
@@ -52,6 +55,7 @@ def test_search_no_match(tmp_db: Path):
 def test_delete(tmp_db: Path):
     sq = SQLiteSearch(tmp_db)
     sq.upsert({
+        "doc_id": "b_0000",
         "filepath": "/docs/b.txt",
         "filename": "b.txt",
         "content": "test content",
@@ -62,7 +66,7 @@ def test_delete(tmp_db: Path):
     })
     results = sq.search("test")
     assert len(results) == 1
-    sq.delete(results[0]["id"])
+    sq.delete(results[0]["doc_id"])
     results = sq.search("test")
     assert len(results) == 0
     sq.close()
@@ -72,6 +76,7 @@ def test_delete_all(tmp_db: Path):
     sq = SQLiteSearch(tmp_db)
     for i in range(5):
         sq.upsert({
+            "doc_id": f"doc{i}_0000",
             "filepath": f"/docs/{i}.txt",
             "filename": f"{i}.txt",
             "content": f"document number {i}",
@@ -99,6 +104,7 @@ def test_stats(tmp_db: Path):
 def test_unicode_content(tmp_db: Path):
     sq = SQLiteSearch(tmp_db)
     sq.upsert({
+        "doc_id": "uni_0000",
         "filepath": "/docs/unicode.txt",
         "filename": "unicode.txt",
         "content": "café résumé naïve über",
@@ -116,6 +122,7 @@ def test_large_content(tmp_db: Path):
     sq = SQLiteSearch(tmp_db)
     big_content = "word " * 10000
     sq.upsert({
+        "doc_id": "big_0000",
         "filepath": "/docs/big.txt",
         "filename": "big.txt",
         "content": big_content,
@@ -132,6 +139,7 @@ def test_large_content(tmp_db: Path):
 def test_line_offset_stored_and_returned(tmp_db: Path):
     sq = SQLiteSearch(tmp_db)
     sq.upsert({
+        "doc_id": "chunk_0000",
         "filepath": "/docs/chunk.py",
         "filename": "chunk.py",
         "content": "def hello():\n    return 'world'",
@@ -150,6 +158,7 @@ def test_line_offset_stored_and_returned(tmp_db: Path):
 def test_line_offset_zero_default(tmp_db: Path):
     sq = SQLiteSearch(tmp_db)
     sq.upsert({
+        "doc_id": "nooffset_0000",
         "filepath": "/docs/noinfo.txt",
         "filename": "noinfo.txt",
         "content": "test content here",
@@ -166,9 +175,9 @@ def test_line_offset_zero_default(tmp_db: Path):
 
 def test_delete_by_file_hash(tmp_db: Path):
     sq = SQLiteSearch(tmp_db)
-    # Insert 3 chunks for same file
     for i in range(3):
         sq.upsert({
+            "doc_id": f"multi_{i:04d}",
             "filepath": "/docs/multichunk.py",
             "filename": "multichunk.py",
             "content": f"chunk {i} content",
@@ -178,15 +187,12 @@ def test_delete_by_file_hash(tmp_db: Path):
             "ingested_at": "2026-01-01T00:00:00Z",
             "file_hash": "multi123",
         })
-    # Dedup: only 1 result per file
     results = sq.search("chunk")
     assert len(results) == 1
     assert results[0]["filepath"] == "/docs/multichunk.py"
 
-    # Delete by hash
     sq.delete_by_file_hash("multi123")
 
-    # All gone
     results = sq.search("chunk")
     assert len(results) == 0
     sq.close()
@@ -195,6 +201,7 @@ def test_delete_by_file_hash(tmp_db: Path):
 def test_delete_by_file_hash_only_removes_matching(tmp_db: Path):
     sq = SQLiteSearch(tmp_db)
     sq.upsert({
+        "doc_id": "a_0000",
         "filepath": "/docs/a.py",
         "filename": "a.py",
         "content": "alpha content",
@@ -204,6 +211,7 @@ def test_delete_by_file_hash_only_removes_matching(tmp_db: Path):
         "file_hash": "hash_a",
     })
     sq.upsert({
+        "doc_id": "b_0000",
         "filepath": "/docs/b.py",
         "filename": "b.py",
         "content": "beta content",
@@ -225,6 +233,7 @@ def test_search_all_chunks_returns_multiple_per_file(tmp_db: Path):
     sq = SQLiteSearch(tmp_db)
     for i in range(3):
         sq.upsert({
+            "doc_id": f"big_{i:04d}",
             "filepath": "/docs/big.py",
             "filename": "big.py",
             "content": f"function number {i} here",
@@ -234,11 +243,9 @@ def test_search_all_chunks_returns_multiple_per_file(tmp_db: Path):
             "ingested_at": "2026-01-01T00:00:00Z",
             "file_hash": "same_hash",
         })
-    # Default: deduped to 1
     results = sq.search("function")
     assert len(results) == 1
 
-    # all_chunks: returns all 3
     results = sq.search("function", all_chunks=True)
     assert len(results) == 3
     offsets = {r["line_offset"] for r in results}

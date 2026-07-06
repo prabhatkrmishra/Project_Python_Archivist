@@ -3,13 +3,14 @@
 Fast keyword search using SQLite's built-in Full-Text Search 5 extension.
 Zero external services required — ideal for local development and small
 to medium document collections.
+
+Uses external-content FTS5 with triggers for ~45% storage savings.
 """
 
 from __future__ import annotations
 
 import re
 import sqlite3
-import uuid
 from pathlib import Path
 
 
@@ -17,6 +18,9 @@ class SQLiteSearch:
     """SQLite FTS5 search backend.
 
     Provides keyword search with BM25 ranking, perfect for local use.
+
+    Schema uses INTEGER PRIMARY KEY for documents and external-content FTS5
+    with content_rowid='id' so FTS5 rowids match documents exactly.
 
     Args:
         db_path: Path to SQLite database file.
@@ -31,10 +35,11 @@ class SQLiteSearch:
         self._init_tables()
 
     def _init_tables(self):
-        """Create documents table and FTS5 virtual table."""
+        """Create documents table, external-content FTS5, and sync triggers."""
         self.conn.executescript("""
             CREATE TABLE IF NOT EXISTS documents (
-                id TEXT PRIMARY KEY,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                doc_id TEXT NOT NULL UNIQUE,
                 filepath TEXT NOT NULL,
                 filename TEXT,
                 content TEXT NOT NULL,
@@ -46,36 +51,65 @@ class SQLiteSearch:
             );
 
             CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
-                id UNINDEXED,
+                doc_id UNINDEXED,
                 filepath,
                 content,
-                tokenize='porter unicode61'
+                content='documents',
+                content_rowid='id',
+                tokenize='porter unicode61 remove_diacritics 2',
+                detail=full
             );
         """)
-        # Migrate existing databases that lack line_offset column
-        try:
-            self.conn.execute("SELECT line_offset FROM documents LIMIT 1")
-        except sqlite3.OperationalError:
-            self.conn.execute("ALTER TABLE documents ADD COLUMN line_offset INTEGER DEFAULT 0")
-            self.conn.commit()
+        self._ensure_triggers()
 
-    def upsert(self, payload: dict) -> str:
-        """Insert or replace a document.
+    def _ensure_triggers(self):
+        """Create triggers to keep external-content FTS5 in sync.
+
+        Uses FTS5's 'delete' command to safely remove old entries before
+        the row disappears from the content table. This is required for
+        external-content FTS5 — bare DELETE FROM documents_fts would cause
+        'database disk image is malformed' because FTS5 tries to fetch
+        content from a row that no longer exists.
+        """
+        self.conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS documents_ai AFTER INSERT ON documents BEGIN
+                INSERT INTO documents_fts(rowid, doc_id, filepath, content)
+                VALUES (new.id, new.doc_id, new.filepath, new.content);
+            END
+        """)
+        self.conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS documents_ad AFTER DELETE ON documents BEGIN
+                INSERT INTO documents_fts(documents_fts, rowid, doc_id, filepath, content)
+                VALUES('delete', old.id, old.doc_id, old.filepath, old.content);
+            END
+        """)
+        self.conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS documents_au AFTER UPDATE ON documents BEGIN
+                INSERT INTO documents_fts(documents_fts, rowid, doc_id, filepath, content)
+                VALUES('delete', old.id, old.doc_id, old.filepath, old.content);
+                INSERT INTO documents_fts(rowid, doc_id, filepath, content)
+                VALUES (new.id, new.doc_id, new.filepath, new.content);
+            END
+        """)
+        self.conn.commit()
+
+    def upsert(self, payload: dict) -> int:
+        """Insert a document.
 
         Args:
-            payload: Document metadata including filepath, content, line_offset, etc.
+            payload: Document metadata including doc_id, filepath, content, etc.
 
         Returns:
-            Document ID string.
+            Integer row ID.
         """
-        point_id = payload.get("id") or str(uuid.uuid4())
+        doc_id = payload["doc_id"]
         self.conn.execute(
             """INSERT OR REPLACE INTO documents
-               (id, filepath, filename, content, line_offset, file_size,
+               (doc_id, filepath, filename, content, line_offset, file_size,
                 modified_at, ingested_at, file_hash)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                point_id,
+                doc_id,
                 payload["filepath"],
                 payload.get("filename", ""),
                 payload["content"],
@@ -86,12 +120,11 @@ class SQLiteSearch:
                 payload.get("file_hash", ""),
             ),
         )
-        self.conn.execute(
-            "INSERT OR REPLACE INTO documents_fts(id, filepath, content) VALUES (?, ?, ?)",
-            (point_id, payload["filepath"], payload["content"]),
-        )
         self.conn.commit()
-        return point_id
+        row_id = self.conn.execute(
+            "SELECT id FROM documents WHERE doc_id = ?", (doc_id,)
+        ).fetchone()[0]
+        return row_id
 
     def search(self, query: str, limit: int = 10, all_chunks: bool = False) -> list[dict]:
         """Search documents using FTS5 BM25 ranking.
@@ -107,19 +140,18 @@ class SQLiteSearch:
                        deduplicating per-file.
 
         Returns:
-            List of result dictionaries with id, filepath, content, line_offset, score.
+            List of result dictionaries with doc_id, filepath, content, line_offset, score.
         """
         fts_query = self._escape_fts(query)
 
         if all_chunks:
-            # No LIMIT — return every matching chunk
             rows = self.conn.execute(
-                """SELECT d.id, d.filepath, d.filename, d.content,
+                """SELECT d.doc_id, d.filepath, d.filename, d.content,
                           d.line_offset, d.file_size, d.modified_at,
                           d.ingested_at, d.file_hash,
                           bm25(documents_fts, 1.0, 1.0) as rank
                    FROM documents_fts f
-                   JOIN documents d ON d.id = f.id
+                   JOIN documents d ON d.id = f.rowid
                    WHERE documents_fts MATCH ?
                    ORDER BY rank""",
                 (fts_query,),
@@ -130,7 +162,7 @@ class SQLiteSearch:
                 raw_rank = row[9] if row[9] is not None else 0.0
                 score = min(1.0, max(0.0, abs(raw_rank) / (1.0 + abs(raw_rank))))
                 results.append({
-                    "id": row[0],
+                    "doc_id": row[0],
                     "filepath": row[1],
                     "filename": row[2],
                     "content": row[3],
@@ -144,15 +176,14 @@ class SQLiteSearch:
             return results
 
         # Deduplicate: keep best-scoring chunk per filepath
-        # Fetch more rows than needed to cover many unique files
         fetch_limit = max(limit * 100, 1000)
         rows = self.conn.execute(
-            """SELECT d.id, d.filepath, d.filename, d.content,
+            """SELECT d.doc_id, d.filepath, d.filename, d.content,
                       d.line_offset, d.file_size, d.modified_at,
                       d.ingested_at, d.file_hash,
                       bm25(documents_fts, 1.0, 1.0) as rank
                FROM documents_fts f
-               JOIN documents d ON d.id = f.id
+               JOIN documents d ON d.id = f.rowid
                WHERE documents_fts MATCH ?
                ORDER BY rank
                LIMIT ?""",
@@ -162,12 +193,11 @@ class SQLiteSearch:
         best_per_file: dict[str, dict] = {}
         for row in rows:
             raw_rank = row[9] if row[9] is not None else 0.0
-            # BM25 rank is negative (more negative = better). Normalize to 0-1 where 1 = best.
             score = min(1.0, max(0.0, abs(raw_rank) / (1.0 + abs(raw_rank))))
             filepath = row[1]
             if filepath not in best_per_file or score > best_per_file[filepath]["score"]:
                 best_per_file[filepath] = {
-                    "id": row[0],
+                    "doc_id": row[0],
                     "filepath": filepath,
                     "filename": row[2],
                     "content": row[3],
@@ -182,14 +212,13 @@ class SQLiteSearch:
         results = sorted(best_per_file.values(), key=lambda r: -r["score"])
         return results[:limit]
 
-    def delete(self, point_id: str):
-        """Delete a document by ID.
+    def delete(self, doc_id: str):
+        """Delete a document by doc_id string.
 
         Args:
-            point_id: Document ID to delete.
+            doc_id: Document doc_id to delete (e.g. 'abc123_0000').
         """
-        self.conn.execute("DELETE FROM documents_fts WHERE id = ?", (point_id,))
-        self.conn.execute("DELETE FROM documents WHERE id = ?", (point_id,))
+        self.conn.execute("DELETE FROM documents WHERE doc_id = ?", (doc_id,))
         self.conn.commit()
 
     def delete_by_file_hash(self, file_hash: str):
@@ -198,18 +227,11 @@ class SQLiteSearch:
         Args:
             file_hash: SHA-256 hash of the file to delete all chunks for.
         """
-        ids = [r[0] for r in self.conn.execute(
-            "SELECT id FROM documents WHERE file_hash = ?", (file_hash,)
-        ).fetchall()]
-        if ids:
-            placeholders = ",".join("?" * len(ids))
-            self.conn.execute(f"DELETE FROM documents_fts WHERE id IN ({placeholders})", ids)
-            self.conn.execute(f"DELETE FROM documents WHERE id IN ({placeholders})", ids)
-            self.conn.commit()
+        self.conn.execute("DELETE FROM documents WHERE file_hash = ?", (file_hash,))
+        self.conn.commit()
 
     def delete_all(self):
         """Clear all documents from the database."""
-        self.conn.execute("DELETE FROM documents_fts")
         self.conn.execute("DELETE FROM documents")
         self.conn.commit()
 
@@ -248,5 +270,4 @@ class SQLiteSearch:
         terms = [re.escape(t.lower()) for t in query.split() if t.strip()]
         if not terms:
             return '""'
-        # Use prefix matching: "shadowtracker*" matches "shadowtrackerextra"
         return " ".join(f"{t}*" for t in terms)

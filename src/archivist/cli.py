@@ -152,7 +152,7 @@ def _ingest_sqlite(filepath: Path, tracker: Tracker) -> int:
         doc_id = f"{file_hash}_{i:04d}"
         line_offset = i * 500
         sq.upsert({
-            "id": doc_id,
+            "doc_id": doc_id,
             "filepath": str(filepath),
             "filename": filepath.name,
             "content": chunk_content,

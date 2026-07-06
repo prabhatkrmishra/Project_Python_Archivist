@@ -35,7 +35,7 @@ def ingest_file(
 ) -> int:
     """Extract and store a single file in SQLite FTS5.
 
-    Large files are split into multiple chunks (500 lines each) and stored
+    Large files are split into multiple chunks (1500 lines each) and stored
     as separate FTS5 documents with line_offset metadata for accurate
     line-number display in search results.
 
@@ -81,7 +81,7 @@ def ingest_file(
         doc_id = f"{file_hash}_{i:04d}"
         line_offset = i * _LINES_PER_CHUNK
         sq.upsert({
-            "id": doc_id,
+            "doc_id": doc_id,
             "filepath": str(path),
             "filename": path.name,
             "content": chunk_content,

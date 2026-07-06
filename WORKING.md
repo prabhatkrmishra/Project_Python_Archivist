@@ -29,7 +29,7 @@ Typer CLI entry point
 │       │   │   └── hashlib.sha256()      # Compute SHA-256 of file contents
 │       │   └── SELECT 1 FROM files WHERE file_hash = ?
 │       │
-│       │ # INGESTION PHASE (per file)
+│           │ # INGESTION PHASE (per file)
 │       └── cli.py:_ingest_sqlite(filepath, tracker)
 │           ├── ingestion/tracker.py:Tracker.is_indexed(filepath)  # Double-check
 │           ├── ingestion/extractors.py:extract_text(filepath)
@@ -44,10 +44,12 @@ Typer CLI entry point
 │           │   ├── re.sub( [^\S\n]+ → " " )    # Collapse spaces, keep newlines
 │           │   └── re.sub( \n{3,} → "\n\n" )    # Max 2 consecutive newlines
 │           ├── search/sqlite_search.py:SQLiteSearch(settings.sqlite_db)
-│           │   └── sqlite3.connect() + CREATE TABLE + CREATE VIRTUAL TABLE FTS5
+│           │   └── sqlite3.connect() + CREATE TABLE + CREATE VIRTUAL TABLE FTS5 (external-content)
+│           │   └── _ensure_triggers() → CREATE TRIGGER documents_ai/ad/au (auto-sync FTS5)
+│           ├── sqlite_search.py:SQLiteSearch.delete_by_file_hash(file_hash)
+│           │   └── DELETE FROM documents WHERE file_hash = ? → triggers clean FTS5 via 'delete' command
 │           ├── sqlite_search.py:SQLiteSearch.upsert(payload)
-│           │   ├── INSERT OR REPLACE INTO documents (id, filepath, content, ...)
-│           │   └── INSERT OR REPLACE INTO documents_fts(id, filepath, content)
+│           │   └── INSERT OR REPLACE INTO documents (doc_id, filepath, content, ...) → trigger auto-inserts to FTS5
 │           ├── sqlite_search.py:SQLiteSearch.close()
 │           └── ingestion/tracker.py:Tracker.record(filepath, file_hash)
 │               └── INSERT OR REPLACE INTO files (file_hash, filepath, ...)
@@ -68,9 +70,9 @@ Typer CLI entry point
 │       ├── search/sqlite_search.py:SQLiteSearch(settings.sqlite_db)
 │       │   └── sqlite3.connect()
 │       ├── sqlite_search.py:SQLiteSearch.search(query, limit, all_chunks)
-│       │   ├── _escape_fts(query)    # Escape FTS5 special chars, prefix match
-│       │   ├── [if all_chunks=False] SELECT ... ORDER BY rank LIMIT N → Best-per-file dedup
-│       │   └── [if all_chunks=True]  SELECT ... ORDER BY rank (no LIMIT) → every chunk
+│       │   ├── _escape_fts(query)    # Escape FTS5 special chars, prefix match, remove_diacritics
+│       │   ├── [if all_chunks=False] SELECT ... JOIN documents d ON d.id = f.rowid ... → Best-per-file dedup
+│       │   └── [if all_chunks=True]  SELECT ... JOIN documents d ON d.id = f.rowid ... → every chunk
 │       └── sqlite_search.py:SQLiteSearch.close()
 │
 │       │ # DISPLAY PHASE
@@ -122,8 +124,7 @@ Typer CLI entry point
 │       │
 │       ├── b["delete"](doc_id)
 │       │   └── sqlite_search.py:SQLiteSearch.delete(doc_id)
-│       │       ├── DELETE FROM documents_fts WHERE id = ?
-│       │       └── DELETE FROM documents WHERE id = ?
+│       │       └── DELETE FROM documents WHERE doc_id = ? → trigger auto-cleans FTS5
 │       │
 │       └── b["close"]()
 │           └── sqlite_search.py:SQLiteSearch.close() → conn.close()
@@ -143,8 +144,7 @@ Typer CLI entry point
 │       │
 │       ├── b["clear"]()
 │       │   └── sqlite_search.py:SQLiteSearch.delete_all()
-│       │       ├── DELETE FROM documents_fts
-│       │       └── DELETE FROM documents
+│       │       └── DELETE FROM documents → triggers auto-clean FTS5
 │       │
 │       ├── b["close"]()
 │       │
@@ -177,7 +177,7 @@ Typer CLI entry point
 | `ingestion/extractors.py` | Text/code/PDF/DOCX/CSV/Excel/JSONL extraction, normalization, chunking |
 | `ingestion/tracker.py` | SQLite SHA256 hash tracker for idempotency |
 | `ingestion/pipeline.py` | Ingestion orchestration |
-| `search/sqlite_search.py` | SQLite FTS5 backend |
+| `search/sqlite_search.py` | SQLite FTS5 backend (external-content with auto-sync triggers) |
 | `vectorizer/hashing_tfidf.py` | HashingVectorizer vectorization |
 | `utils/text.py` | Line-numbered snippet extraction |
 | `api/routes.py` | FastAPI REST endpoints |
@@ -198,8 +198,8 @@ File → extract_text()
 
 → normalize_for_display() → SQLiteSearch.upsert()
                                                         ↓
-                                              documents table (metadata)
-                                              documents_fts table (FTS5 index)
+                                              documents table (INTEGER id, TEXT doc_id, content)
+                                              trigger documents_ai → documents_fts (external-content, no content stored)
                                                         ↓
                                               tracker.record(file_hash)
                                                         ↓
