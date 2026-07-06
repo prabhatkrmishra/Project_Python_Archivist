@@ -14,10 +14,9 @@ from pathlib import Path
 
 
 class SQLiteSearch:
-    """Drop-in replacement for Qdrant using SQLite FTS5.
+    """SQLite FTS5 search backend.
 
-    Provides keyword search with BM25 ranking, perfect for local use
-    where Qdrant is not available or necessary.
+    Provides keyword search with BM25 ranking, perfect for local use.
 
     Args:
         db_path: Path to SQLite database file.
@@ -39,6 +38,7 @@ class SQLiteSearch:
                 filepath TEXT NOT NULL,
                 filename TEXT,
                 content TEXT NOT NULL,
+                line_offset INTEGER DEFAULT 0,
                 file_size INTEGER,
                 modified_at TEXT,
                 ingested_at TEXT,
@@ -52,26 +52,34 @@ class SQLiteSearch:
                 tokenize='porter unicode61'
             );
         """)
+        # Migrate existing databases that lack line_offset column
+        try:
+            self.conn.execute("SELECT line_offset FROM documents LIMIT 1")
+        except sqlite3.OperationalError:
+            self.conn.execute("ALTER TABLE documents ADD COLUMN line_offset INTEGER DEFAULT 0")
+            self.conn.commit()
 
     def upsert(self, payload: dict) -> str:
         """Insert or replace a document.
 
         Args:
-            payload: Document metadata including filepath, content, etc.
+            payload: Document metadata including filepath, content, line_offset, etc.
 
         Returns:
-            Point ID string.
+            Document ID string.
         """
         point_id = payload.get("id") or str(uuid.uuid4())
         self.conn.execute(
             """INSERT OR REPLACE INTO documents
-               (id, filepath, filename, content, file_size, modified_at, ingested_at, file_hash)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+               (id, filepath, filename, content, line_offset, file_size,
+                modified_at, ingested_at, file_hash)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 point_id,
                 payload["filepath"],
                 payload.get("filename", ""),
                 payload["content"],
+                payload.get("line_offset", 0),
                 payload.get("file_size", 0),
                 payload.get("modified_at", ""),
                 payload.get("ingested_at", ""),
@@ -85,45 +93,94 @@ class SQLiteSearch:
         self.conn.commit()
         return point_id
 
-    def search(self, query: str, limit: int = 10) -> list[dict]:
+    def search(self, query: str, limit: int = 10, all_chunks: bool = False) -> list[dict]:
         """Search documents using FTS5 BM25 ranking.
+
+        By default returns the best matching chunk per file to avoid
+        duplicate results from the same file. Use all_chunks=True to
+        return every matching chunk across all files (no limit).
 
         Args:
             query: Search query string.
-            limit: Maximum number of results.
+            limit: Maximum number of results (ignored when all_chunks=True).
+            all_chunks: If True, return all matching chunks instead of
+                       deduplicating per-file.
 
         Returns:
-            List of result dictionaries with id, filepath, content, score.
+            List of result dictionaries with id, filepath, content, line_offset, score.
         """
         fts_query = self._escape_fts(query)
+
+        if all_chunks:
+            # No LIMIT — return every matching chunk
+            rows = self.conn.execute(
+                """SELECT d.id, d.filepath, d.filename, d.content,
+                          d.line_offset, d.file_size, d.modified_at,
+                          d.ingested_at, d.file_hash,
+                          bm25(documents_fts, 1.0, 1.0) as rank
+                   FROM documents_fts f
+                   JOIN documents d ON d.id = f.id
+                   WHERE documents_fts MATCH ?
+                   ORDER BY rank""",
+                (fts_query,),
+            ).fetchall()
+
+            results = []
+            for row in rows:
+                raw_rank = row[9] if row[9] is not None else 0.0
+                score = min(1.0, max(0.0, abs(raw_rank) / (1.0 + abs(raw_rank))))
+                results.append({
+                    "id": row[0],
+                    "filepath": row[1],
+                    "filename": row[2],
+                    "content": row[3],
+                    "line_offset": row[4],
+                    "file_size": row[5],
+                    "modified_at": row[6],
+                    "ingested_at": row[7],
+                    "file_hash": row[8],
+                    "score": round(score, 4),
+                })
+            return results
+
+        # Deduplicate: keep best-scoring chunk per filepath
+        # Fetch more rows than needed to cover many unique files
+        fetch_limit = max(limit * 100, 1000)
         rows = self.conn.execute(
             """SELECT d.id, d.filepath, d.filename, d.content,
-                      d.file_size, d.modified_at, d.ingested_at, d.file_hash,
+                      d.line_offset, d.file_size, d.modified_at,
+                      d.ingested_at, d.file_hash,
                       bm25(documents_fts, 1.0, 1.0) as rank
                FROM documents_fts f
                JOIN documents d ON d.id = f.id
                WHERE documents_fts MATCH ?
                ORDER BY rank
                LIMIT ?""",
-            (fts_query, limit),
+            (fts_query, fetch_limit),
         ).fetchall()
 
-        results = []
+        best_per_file: dict[str, dict] = {}
         for row in rows:
-            raw_rank = row[8] if row[8] is not None else 0.0
-            score = min(1.0, max(0.0, 1.0 / (1.0 + abs(raw_rank))))
-            results.append({
-                "id": row[0],
-                "filepath": row[1],
-                "filename": row[2],
-                "content": row[3],
-                "file_size": row[4],
-                "modified_at": row[5],
-                "ingested_at": row[6],
-                "file_hash": row[7],
-                "score": round(score, 4),
-            })
-        return results
+            raw_rank = row[9] if row[9] is not None else 0.0
+            # BM25 rank is negative (more negative = better). Normalize to 0-1 where 1 = best.
+            score = min(1.0, max(0.0, abs(raw_rank) / (1.0 + abs(raw_rank))))
+            filepath = row[1]
+            if filepath not in best_per_file or score > best_per_file[filepath]["score"]:
+                best_per_file[filepath] = {
+                    "id": row[0],
+                    "filepath": filepath,
+                    "filename": row[2],
+                    "content": row[3],
+                    "line_offset": row[4],
+                    "file_size": row[5],
+                    "modified_at": row[6],
+                    "ingested_at": row[7],
+                    "file_hash": row[8],
+                    "score": round(score, 4),
+                }
+
+        results = sorted(best_per_file.values(), key=lambda r: -r["score"])
+        return results[:limit]
 
     def delete(self, point_id: str):
         """Delete a document by ID.
@@ -134,6 +191,21 @@ class SQLiteSearch:
         self.conn.execute("DELETE FROM documents_fts WHERE id = ?", (point_id,))
         self.conn.execute("DELETE FROM documents WHERE id = ?", (point_id,))
         self.conn.commit()
+
+    def delete_by_file_hash(self, file_hash: str):
+        """Delete all chunks belonging to a file.
+
+        Args:
+            file_hash: SHA-256 hash of the file to delete all chunks for.
+        """
+        ids = [r[0] for r in self.conn.execute(
+            "SELECT id FROM documents WHERE file_hash = ?", (file_hash,)
+        ).fetchall()]
+        if ids:
+            placeholders = ",".join("?" * len(ids))
+            self.conn.execute(f"DELETE FROM documents_fts WHERE id IN ({placeholders})", ids)
+            self.conn.execute(f"DELETE FROM documents WHERE id IN ({placeholders})", ids)
+            self.conn.commit()
 
     def delete_all(self):
         """Clear all documents from the database."""
@@ -162,9 +234,10 @@ class SQLiteSearch:
 
     @staticmethod
     def _escape_fts(query: str) -> str:
-        """Escape FTS5 special characters and build phrase query.
+        """Escape FTS5 special characters and build query.
 
-        Always treats the query as an exact phrase for precise results.
+        Uses prefix matching so partial token matches work (e.g. searching
+        for "ShadowTracker" matches "ShadowTrackerExtra" in the index).
 
         Args:
             query: Raw search query.
@@ -175,5 +248,5 @@ class SQLiteSearch:
         terms = [re.escape(t.lower()) for t in query.split() if t.strip()]
         if not terms:
             return '""'
-        # Always phrase search
-        return '"' + " ".join(terms) + '"'
+        # Use prefix matching: "shadowtracker*" matches "shadowtrackerextra"
+        return " ".join(f"{t}*" for t in terms)

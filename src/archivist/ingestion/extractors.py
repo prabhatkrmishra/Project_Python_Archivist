@@ -28,6 +28,7 @@ import xlrd
 SUPPORTED_EXTENSIONS = {
     # Plain text / code
     ".txt", ".py", ".js", ".ts", ".jsx", ".tsx", ".java", ".c", ".cpp", ".h",
+    ".hpp", ".cc", ".cxx", ".hh", ".hxx",
     ".cs", ".rb", ".go", ".rs", ".php", ".html", ".htm", ".css", ".scss",
     ".json", ".yaml", ".yml", ".toml", ".xml", ".ini", ".cfg", ".conf",
     ".md", ".rst", ".csv", ".tsv", ".sql", ".sh", ".bash", ".zsh", ".bat",
@@ -36,6 +37,18 @@ SUPPORTED_EXTENSIONS = {
     ".pdf", ".docx",
     # Tabular data
     ".xls", ".xlsx", ".jsonl",
+}
+
+# Extensions that support line-based chunking (code/text files)
+_CODE_EXTENSIONS = {
+    ".c", ".cpp", ".h", ".hpp", ".cc", ".cxx", ".hh", ".hxx",
+    ".py", ".js", ".ts", ".jsx", ".tsx", ".java", ".cs", ".rb",
+    ".go", ".rs", ".php", ".swift", ".kt", ".scala", ".r",
+    ".sh", ".bash", ".zsh", ".bat", ".ps1",
+    ".md", ".rst", ".txt", ".log",
+    ".xml", ".html", ".htm", ".css", ".scss",
+    ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf",
+    ".sql", ".proto", ".cmake",
 }
 
 # Chunking thresholds
@@ -408,6 +421,10 @@ def should_chunk(path: Path, text: str) -> bool:
         line_count = text.count("\n") + 1
         if line_count > 10000:
             return True
+    if ext in _CODE_EXTENSIONS:
+        line_count = text.count("\n") + 1
+        if line_count > 500:
+            return True
     return False
 
 
@@ -447,7 +464,8 @@ def chunk_docx_by_section(path: Path) -> list[str]:
 
 
 def chunk_text(path: Path, text: str) -> list[str]:
-    """Chunk large documents by page (PDF), section (DOCX), rows (CSV), or lines (JSONL).
+    """Chunk large documents by page (PDF), section (DOCX), rows (CSV), lines (JSONL),
+    or lines (code/text files).
 
     Args:
         path: Path to file.
@@ -465,6 +483,8 @@ def chunk_text(path: Path, text: str) -> list[str]:
         return chunk_csv_by_rows(text)
     if ext == ".jsonl":
         return chunk_jsonl_by_lines(text)
+    if ext in _CODE_EXTENSIONS:
+        return chunk_code_by_lines(text)
     return [text]
 
 
@@ -508,6 +528,28 @@ def chunk_jsonl_by_lines(text: str, lines_per_chunk: int = 500) -> list[str]:
     if not lines:
         return [text]
 
+    chunks: list[str] = []
+    for i in range(0, len(lines), lines_per_chunk):
+        chunks.append("\n".join(lines[i : i + lines_per_chunk]))
+    return chunks
+
+
+def chunk_code_by_lines(text: str, lines_per_chunk: int = 1500) -> list[str]:
+    """Split code/text into chunks by line count.
+
+    Used for source code, config, markdown, and other text files
+    that benefit from line-based chunking instead of content truncation.
+
+    Args:
+        text: Extracted text content.
+        lines_per_chunk: Maximum lines per chunk (default 1500).
+
+    Returns:
+        List of text chunks, each up to lines_per_chunk lines.
+    """
+    lines = text.split("\n")
+    if len(lines) <= lines_per_chunk:
+        return [text]
     chunks: list[str] = []
     for i in range(0, len(lines), lines_per_chunk):
         chunks.append("\n".join(lines[i : i + lines_per_chunk]))

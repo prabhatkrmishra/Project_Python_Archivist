@@ -13,10 +13,9 @@ from pathlib import Path
 import typer
 from rich.console import Console
 from rich.panel import Panel
-from rich.table import Table
 
 from archivist.config import get_settings
-from archivist.ingestion.extractors import iter_files, normalize_for_display
+from archivist.ingestion.extractors import iter_files
 from archivist.ingestion.tracker import Tracker
 from archivist.utils.text import extract_snippet
 
@@ -35,7 +34,7 @@ def _get_backend():
     sq = SQLiteSearch(settings.sqlite_db)
     return {
         "client": sq,
-        "search": lambda q, limit=10: sq.search(q, limit=limit),
+        "search": lambda q, limit=10, all_chunks=False: sq.search(q, limit=limit, all_chunks=all_chunks),
         "delete": lambda doc_id: sq.delete(doc_id),
         "stats": lambda: sq.stats(),
         "clear": lambda: sq.delete_all(),
@@ -104,24 +103,30 @@ def ingest(
 def _ingest_sqlite(filepath: Path, tracker: Tracker) -> int:
     """Ingest a file into SQLite FTS5 backend.
 
+    Large files are split into multiple chunks (500 lines each).
+
     Args:
         filepath: Path to file to ingest.
         tracker: Tracker instance for idempotency.
 
     Returns:
-        Number of vectors created (1 if content, 0 if empty/skipped).
+        Number of chunks created (1 if content, 0 if empty/skipped).
     """
     import time
-    from archivist.ingestion.extractors import extract_text
+    from archivist.ingestion.extractors import (
+        extract_text,
+        normalize_for_display,
+        should_chunk,
+        chunk_text,
+    )
 
     if tracker.is_indexed(filepath):
         return 0
 
     raw = extract_text(filepath)
     display_text = normalize_for_display(raw)
-    content = display_text[:50_000]  # FTS5 size limit
 
-    if not content.strip():
+    if not display_text.strip():
         file_hash = hashlib.sha256(filepath.read_bytes()).hexdigest()
         tracker.record(filepath, file_hash)
         return 0
@@ -130,18 +135,37 @@ def _ingest_sqlite(filepath: Path, tracker: Tracker) -> int:
     sq = SQLiteSearch(settings.sqlite_db)
 
     file_hash = hashlib.sha256(filepath.read_bytes()).hexdigest()
-    sq.upsert({
-        "filepath": str(filepath),
-        "filename": filepath.name,
-        "content": content,
-        "file_size": filepath.stat().st_size,
-        "modified_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(filepath.stat().st_mtime)),
-        "ingested_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "file_hash": file_hash,
-    })
+
+    # Delete old chunks if re-ingesting
+    sq.delete_by_file_hash(file_hash)
+
+    # Chunk the content
+    if should_chunk(filepath, display_text):
+        chunks = chunk_text(filepath, display_text)
+    else:
+        chunks = [display_text]
+
+    timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    stat = filepath.stat()
+
+    for i, chunk_content in enumerate(chunks):
+        doc_id = f"{file_hash}_{i:04d}"
+        line_offset = i * 500
+        sq.upsert({
+            "id": doc_id,
+            "filepath": str(filepath),
+            "filename": filepath.name,
+            "content": chunk_content,
+            "line_offset": line_offset,
+            "file_size": stat.st_size,
+            "modified_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(stat.st_mtime)),
+            "ingested_at": timestamp,
+            "file_hash": file_hash,
+        })
+
     sq.close()
     tracker.record(filepath, file_hash)
-    return 1
+    return len(chunks)
 
 
 @app.command()
@@ -149,11 +173,12 @@ def search(
     query: str,
     top: int = typer.Option(10, "--top", "-n"),
     json_output: bool = typer.Option(False, "--json", "-j"),
+    all_chunks: bool = typer.Option(False, "--all", "-a"),
 ):
     """Search ingested documents."""
     from archivist.search.sqlite_search import SQLiteSearch
     sq = SQLiteSearch(settings.sqlite_db)
-    results = sq.search(query, limit=top)
+    results = sq.search(query, limit=top, all_chunks=all_chunks)
     sq.close()
 
     if not results:
@@ -162,7 +187,8 @@ def search(
 
     for i, hit in enumerate(results, 1):
         content = hit.get("content", "")
-        snippet = extract_snippet(content, query)
+        line_offset = hit.get("line_offset", 0)
+        snippet = extract_snippet(content, query, line_offset=line_offset)
         filepath = hit.get("filepath", "unknown")
         source = Path(filepath).name if filepath != "unknown" else "unknown"
         score = hit.get("score", 0.0)

@@ -15,6 +15,7 @@ from archivist.ingestion.extractors import (
     extract_jsonl,
     chunk_csv_by_rows,
     chunk_jsonl_by_lines,
+    chunk_code_by_lines,
 )
 
 
@@ -300,3 +301,49 @@ def test_supported_extensions_includes_tabular():
     assert ".xls" in SUPPORTED_EXTENSIONS
     assert ".xlsx" in SUPPORTED_EXTENSIONS
     assert ".jsonl" in SUPPORTED_EXTENSIONS
+
+
+# --- Code Chunking Tests ---
+
+
+def test_chunk_code_by_lines_small_file(tmp_path: Path):
+    """Small files stay as single chunk."""
+    text = "def hello():\n    return 'world'\n"
+    chunks = chunk_code_by_lines(text)
+    assert len(chunks) == 1
+    assert chunks[0] == text
+
+
+def test_chunk_code_by_lines_exact_boundary(tmp_path: Path):
+    """File at exactly 1500 lines stays as single chunk."""
+    lines = [f"L{i:04d}" for i in range(1500)]
+    text = "\n".join(lines)
+    chunks = chunk_code_by_lines(text)
+    assert len(chunks) == 1
+
+
+def test_chunk_code_by_lines_splits_large_file(tmp_path: Path):
+    """Large files are split into chunks of 1500 lines."""
+    lines = [f"L{i:04d}" for i in range(4200)]
+    text = "\n".join(lines)
+    chunks = chunk_code_by_lines(text)
+    assert len(chunks) == 3  # 1500+1500+1200
+    for c in chunks:
+        assert c.strip()  # no empty chunks
+
+
+def test_chunk_code_by_lines_preserves_content(tmp_path: Path):
+    """Chunk content matches original lines."""
+    lines = [f"line{i}" for i in range(3200)]
+    text = "\n".join(lines)
+    chunks = chunk_code_by_lines(text)
+    assert len(chunks) == 3  # 1500+1500+200
+    # First chunk has first 1500 lines
+    chunk1_lines = chunks[0].split("\n")
+    assert len(chunk1_lines) == 1500
+    assert chunk1_lines[0] == "line0"
+    assert chunk1_lines[1499] == "line1499"
+    # Second chunk has next 1500 lines
+    chunk2_lines = chunks[1].split("\n")
+    assert len(chunk2_lines) == 1500
+    assert chunk2_lines[0] == "line1500"

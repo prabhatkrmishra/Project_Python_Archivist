@@ -67,13 +67,10 @@ Typer CLI entry point
 │   └── cli.py:search()                   # @app.command()
 │       ├── search/sqlite_search.py:SQLiteSearch(settings.sqlite_db)
 │       │   └── sqlite3.connect()
-│       ├── sqlite_search.py:SQLiteSearch.search(query, limit)
-│       │   ├── _escape_fts(query)    # Escape FTS5 special chars, build OR query
-│       │   └── SELECT d.*, bm25(rank)
-│       │       FROM documents_fts f
-│       │       JOIN documents d ON d.id = f.id
-│       │       WHERE documents_fts MATCH ?
-│       │       ORDER BY rank LIMIT ?
+│       ├── sqlite_search.py:SQLiteSearch.search(query, limit, all_chunks)
+│       │   ├── _escape_fts(query)    # Escape FTS5 special chars, prefix match
+│       │   ├── [if all_chunks=False] SELECT ... ORDER BY rank LIMIT N → Best-per-file dedup
+│       │   └── [if all_chunks=True]  SELECT ... ORDER BY rank (no LIMIT) → every chunk
 │       └── sqlite_search.py:SQLiteSearch.close()
 │
 │       │ # DISPLAY PHASE

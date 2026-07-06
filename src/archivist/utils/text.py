@@ -8,7 +8,8 @@ from __future__ import annotations
 import re
 
 
-def extract_snippet(content: str, query: str, context_lines: int = 3) -> str:
+def extract_snippet(content: str, query: str, context_lines: int = 3,
+                     line_offset: int = 0) -> str:
     """Return a line-numbered snippet centered on the best query-term match.
 
     Displays the matching line with a ► marker and surrounding context lines.
@@ -16,25 +17,29 @@ def extract_snippet(content: str, query: str, context_lines: int = 3) -> str:
     Prefers exact phrase matches over single-term matches.
 
     Args:
-        content: Full document text.
+        content: Full document text (or chunk text).
         query: User's search query.
         context_lines: Lines of context before and after the match.
+        line_offset: Starting line number of this chunk in the original file.
 
     Returns:
-        Multi-line snippet with line numbers, e.g.:
+        Multi-line snippet with absolute line numbers, e.g.:
             ...
-            L142: sigaltstack(&ss, nullptr);
-            L143: struct sigaction sa{};
-            > L144: sa.sa_sigaction = segvHandler;
-            L145: sigemptyset(&sa.sa_mask);
-            L146: sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+            L1542: sigaltstack(&ss, nullptr);
+            L1543: struct sigaction sa{};
+            > L1544: sa.sa_sigaction = segvHandler;
+            L1545: sigemptyset(&sa.sa_mask);
+            L1546: sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
             ...
     """
     terms = [re.escape(t) for t in query.split() if t]
     if not terms:
         lines = content.splitlines()
         shown = lines[: context_lines * 2 + 1]
-        return "\n".join(f"  [green]L{i+1}[/green][orange]:[/orange] {l}" for i, l in enumerate(shown))
+        return "\n".join(
+            f"  [green]L{i + line_offset + 1}[/green][orange]:[/orange] {line}"
+            for i, line in enumerate(shown)
+        )
 
     # Build patterns: prefer exact phrase, fall back to any-term match
     phrase_pattern = re.compile(" ".join(terms), re.IGNORECASE)
@@ -58,7 +63,10 @@ def extract_snippet(content: str, query: str, context_lines: int = 3) -> str:
 
     if match_line_idx is None:
         shown = lines[: context_lines * 2 + 1]
-        return "\n".join(f"  [green]L{i+1}[/green][orange]:[/orange] {l}" for i, l in enumerate(shown))
+        return "\n".join(
+            f"  [green]L{i + line_offset + 1}[/green][orange]:[/orange] {line}"
+            for i, line in enumerate(shown)
+        )
 
     start = max(0, match_line_idx - context_lines)
     end = min(len(lines), match_line_idx + context_lines + 1)
@@ -69,7 +77,7 @@ def extract_snippet(content: str, query: str, context_lines: int = 3) -> str:
             prefix = "[bright_cyan]> [/bright_cyan]"
         else:
             prefix = "  "
-        parts.append(f"{prefix}[green]L{i+1}[/green][orange]:[/orange] {lines[i]}")
+        parts.append(f"{prefix}[green]L{i + line_offset + 1}[/green][orange]:[/orange] {lines[i]}")
 
     if start > 0:
         parts.insert(0, "  ...")

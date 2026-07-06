@@ -53,8 +53,10 @@ archivist ingest ./my_documents
 ### Search
 
 ```bash
-archivist search "quarterly budget"
-archivist search "project alpha" --json   # machine-readable
+archivist search "quarterly budget"              # default: 10 results, best chunk per file
+archivist search "project alpha" --json          # machine-readable output
+archivist search "ShadowTracker" --all           # every matching chunk from every file
+archivist search "ShadowTracker" --all -n 50     # every matching chunk, up to 50 results
 ```
 
 ### Status
@@ -91,9 +93,17 @@ archivist ingest /path/to/docs \
 
 ```bash
 archivist search "machine learning" \
-  --top 10           # number of results (default: 10) \
-  --json             # JSON output for scripting
+  --top 10           # max results (default: 10) \
+  --json             # JSON output for scripting \
+  --all              # show every matching chunk (no limit, no dedup)
 ```
+
+**Default behavior** (without `--all`): Returns the single best-matching chunk per file.
+If 50 chunks from the same file match, only the top-scoring one is shown.
+This keeps results diverse and easy to scan.
+
+**With `--all`**: Returns every matching chunk across all files with no limit.
+Useful for seeing every occurrence of a term in a large codebase.
 
 ### Example Output
 
