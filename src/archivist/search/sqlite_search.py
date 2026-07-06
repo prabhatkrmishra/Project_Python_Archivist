@@ -261,13 +261,41 @@ class SQLiteSearch:
         Uses prefix matching so partial token matches work (e.g. searching
         for "ShadowTracker" matches "ShadowTrackerExtra" in the index).
 
+        FTS5 has strict syntax rules:
+        - `-` is AND NOT (triggers column lookup when followed by digits)
+        - `+` is require operator
+        - `@` `/` `.` `$` `%` `!` `#` `<` `>` cause syntax errors
+        - `*` is prefix operator (can't use inside quotes)
+        - `:` is column filter
+
+        Strategy: replace dangerous chars with spaces so "ISBN-9780000000014"
+        becomes "isbn 9780000000014" and matches both tokens.
+
         Args:
             query: Raw search query.
 
         Returns:
             FTS5-compatible query string.
         """
-        terms = [re.escape(t.lower()) for t in query.split() if t.strip()]
+        # Replace FTS5-dangerous characters with spaces
+        # - → AND NOT (column lookup with digits)
+        # + → require operator
+        # @ / → syntax errors
+        # * → prefix operator (we add our own)
+        # " ( ) → grouping/phrase
+        # \ → escape char (causes "syntax error near \")
+        _FTS_DANGEROUS = re.compile(r'[-+@"()/\\*$.%&!#<>=]')
+        terms = []
+        for t in query.split():
+            t = t.strip()
+            if not t:
+                continue
+            # Replace dangerous chars with space, collapse multiple spaces
+            t = _FTS_DANGEROUS.sub(' ', t).strip()
+            t = re.sub(r'\s+', ' ', t)
+            if t:
+                terms.append(t.lower())
         if not terms:
             return '""'
+        # Each term gets prefix matching, joined by implicit AND
         return " ".join(f"{t}*" for t in terms)
