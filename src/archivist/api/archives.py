@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 ARCHIVE_EXTENSIONS = {".zip", ".rar", ".7z"}
 
 # Max files to extract from a single archive
-_MAX_ARCHIVE_FILES = 1000
+_MAX_ARCHIVE_FILES = 5000
 
 
 class ArchiveError(Exception):

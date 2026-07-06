@@ -131,11 +131,18 @@ class SQLiteSearch:
 
         By default returns the best matching chunk per file to avoid
         duplicate results from the same file. Use all_chunks=True to
-        return every matching chunk across all files (no limit).
+        return every matching chunk across all files.
+
+        Always returns the full matching set (deduplicated when
+        all_chunks=False) so callers can compute an accurate total count
+        and slice their own page out of it. `limit` only controls how
+        many raw FTS rows are scanned when building the per-file
+        dedup pool; it does not truncate the returned results.
 
         Args:
             query: Search query string.
-            limit: Maximum number of results (ignored when all_chunks=True).
+            limit: Used to size the internal raw-row fetch pool for
+                deduplication (ignored when all_chunks=True).
             all_chunks: If True, return all matching chunks instead of
                        deduplicating per-file.
 
@@ -210,7 +217,7 @@ class SQLiteSearch:
                 }
 
         results = sorted(best_per_file.values(), key=lambda r: -r["score"])
-        return results[:limit]
+        return results
 
     def delete(self, doc_id: str):
         """Delete a document by doc_id string.

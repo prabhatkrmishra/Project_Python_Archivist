@@ -102,6 +102,11 @@ class Tracker:
         total = self._conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
         return {"indexed_files": total}
 
+    def clear(self) -> None:
+        """Clear all tracked files."""
+        self._conn.execute("DELETE FROM files")
+        self._conn.commit()
+
     def close(self) -> None:
         """Close the database connection."""
         self._conn.close()

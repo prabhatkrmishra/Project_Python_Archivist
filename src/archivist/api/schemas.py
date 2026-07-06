@@ -110,3 +110,16 @@ class ErrorResponse(BaseModel):
     """Standard error response."""
 
     detail: str
+
+
+class JobStatus(BaseModel):
+    """Progress of an async ingestion job."""
+
+    job_id: str
+    status: str = Field(description="pending, running, done, error")
+    total_files: int = 0
+    processed_files: int = 0
+    current_file: str = ""
+    elapsed_seconds: float = 0.0
+    error: str | None = None
+    result: IngestResponse | None = None

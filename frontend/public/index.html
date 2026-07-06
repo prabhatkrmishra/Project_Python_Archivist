@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Archivist — Document Search Engine</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- Header -->
+  <header>
+    <a href="#" class="brand" onclick="switchTab('search')">
+      <div class="brand-icon">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/></svg>
+      </div>
+      <div>
+        <h1>Archivist</h1>
+        <span class="subtitle">Document Search Engine</span>
+      </div>
+    </a>
+    <button class="menu-toggle" id="menu-toggle" aria-label="Toggle menu">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+    </button>
+    <div class="upload-indicator" id="upload-indicator" title="Upload in progress">
+      <div class="upload-indicator-dot"></div>
+      <span class="upload-indicator-text">Uploading...</span>
+    </div>
+  </header>
+
+  <!-- Navigation -->
+  <nav id="main-nav">
+    <button class="tab active" data-tab="search">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      Search
+    </button>
+    <button class="tab" data-tab="ingest">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+      Ingest
+    </button>
+    <button class="tab" data-tab="documents">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/></svg>
+      Documents
+    </button>
+    <button class="tab" data-tab="status">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+      Status
+    </button>
+  </nav>
+
+  <!-- Search Panel -->
+  <section id="search" class="panel">
+    <form id="search-form" class="search-container">
+      <div class="search-input-wrapper">
+        <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <input type="text" id="search-input" class="input" placeholder="Search documents..." autocomplete="off">
+        <button type="button" class="search-clear" id="search-clear" aria-label="Clear search">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div class="search-mode">
+        <button type="button" class="mode-btn active" data-mode="top" title="Best result per file">Top</button>
+        <button type="button" class="mode-btn" data-mode="all" title="All matching chunks">All</button>
+      </div>
+      <button type="submit" class="btn btn-primary">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        Search
+      </button>
+    </form>
+    <div id="search-meta" class="search-meta"></div>
+    <div id="search-loading" class="search-loading">
+      <div class="spinner"></div> Searching...
+    </div>
+    <div id="search-results" class="results-grid"></div>
+    <div id="search-pagination" style="display:none">
+      <button id="search-prev" class="btn btn-secondary btn-sm" disabled>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg>
+        Previous
+      </button>
+      <span id="search-page-info" class="text-muted">Showing 1-20 of 0</span>
+      <button id="search-next" class="btn btn-secondary btn-sm" disabled>
+        Next
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="9 18 15 12 9 6"/></svg>
+      </button>
+    </div>
+  </section>
+
+  <!-- Ingest Panel -->
+  <section id="ingest" class="panel">
+    <h2 class="mb-4">Ingest Files</h2>
+    <div class="ingest-grid">
+      <!-- Upload Files -->
+      <div class="ingest-group">
+        <h3>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
+          Upload Files
+        </h3>
+        <div class="drop-zone" id="upload-drop">
+          <input type="file" id="file-input" multiple hidden>
+          <div class="drop-zone-content">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            <p>Drop files here or <span class="drop-link">browse</span></p>
+            <span class="drop-hint">Any supported file type</span>
+          </div>
+          <div class="drop-zone-files" id="upload-file-list"></div>
+        </div>
+        <div class="upload-actions">
+          <button type="button" id="upload-btn" class="btn btn-primary" disabled>Upload Files</button>
+          <button type="button" id="upload-clear" class="btn btn-ghost" style="display:none">Clear</button>
+        </div>
+        <div id="upload-status"></div>
+      </div>
+
+      <!-- Upload Archive -->
+      <div class="ingest-group">
+        <h3>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 8v13H3V8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
+          Upload Archive
+        </h3>
+        <div class="drop-zone" id="archive-drop">
+          <input type="file" id="archive-input" accept=".zip,.7z,.rar" hidden>
+          <div class="drop-zone-content">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            <p>Drop archive here or <span class="drop-link">browse</span></p>
+            <span class="drop-hint">ZIP, 7z, or RAR</span>
+          </div>
+          <div class="drop-zone-files" id="archive-file-list"></div>
+      <div class="archive-preview" id="archive-preview" style="display:none"></div>
+        </div>
+        <div class="upload-actions">
+          <button type="button" id="archive-btn" class="btn btn-primary" disabled>Upload Archive</button>
+          <button type="button" id="archive-clear" class="btn btn-ghost" style="display:none">Clear</button>
+        </div>
+        <div id="archive-status"></div>
+      </div>
+
+      <!-- Ingest Directory -->
+      <div class="ingest-group">
+        <h3>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+          Ingest Directory
+        </h3>
+        <div class="drop-zone" id="dir-drop">
+          <input type="file" id="dir-input" webkitdirectory multiple hidden>
+          <div class="drop-zone-content">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+            <p>Drop a folder here or <span class="drop-link">browse</span></p>
+            <span class="drop-hint">Select a folder to ingest all files inside</span>
+          </div>
+          <div class="drop-zone-files" id="dir-file-list"></div>
+        </div>
+        <div class="upload-actions">
+          <label class="checkbox-label"><input type="checkbox" id="dir-recursive" checked> Recursive (always on for folders)</label>
+        </div>
+        <div class="upload-actions">
+          <button type="button" id="dir-btn" class="btn btn-primary" disabled>Ingest Folder</button>
+          <button type="button" id="dir-clear" class="btn btn-ghost" style="display:none">Clear</button>
+        </div>
+        <div id="dir-status"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Documents Panel -->
+  <section id="documents" class="panel">
+    <div class="documents-header">
+      <h2>Documents</h2>
+      <div class="documents-controls">
+        <div class="ext-dropdown" id="doc-ext-dropdown">
+          <button type="button" class="ext-dropdown-trigger" id="doc-ext-trigger" aria-haspopup="listbox" aria-expanded="false">
+            <span id="doc-ext-trigger-label">All types</span>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
+          </button>
+          <div class="ext-dropdown-panel" id="doc-ext-panel">
+            <div class="ext-dropdown-search">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+              <input type="text" id="doc-ext-search" placeholder="Search extensions...">
+            </div>
+            <ul class="ext-dropdown-list" id="doc-ext-list" role="listbox"></ul>
+          </div>
+        </div>
+        <button id="doc-refresh" class="btn btn-secondary btn-sm">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+          Refresh
+        </button>
+      </div>
+    </div>
+    <div class="doc-toolbar" id="doc-toolbar" style="display:none">
+      <span class="doc-toolbar-info"><span id="doc-selected-count">0</span> selected</span>
+      <button id="doc-bulk-delete" class="btn btn-danger btn-sm">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+        Delete Selected
+      </button>
+    </div>
+    <div id="doc-list" class="doc-list"></div>
+    <div id="doc-pagination">
+      <button id="doc-prev" class="btn btn-secondary btn-sm" disabled>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg>
+        Previous
+      </button>
+      <span id="doc-page-info" class="text-muted">Page 1</span>
+      <button id="doc-next" class="btn btn-secondary btn-sm">
+        Next
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="9 18 15 12 9 6"/></svg>
+      </button>
+    </div>
+  </section>
+
+  <!-- Status Panel -->
+  <section id="status" class="panel">
+    <div class="status-header">
+      <h2>Index Status</h2>
+      <button id="clear-all-btn" class="btn btn-danger btn-sm">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+        Clear All
+      </button>
+    </div>
+    <div id="status-cards" class="stats-grid"></div>
+    <div id="clear-status"></div>
+  </section>
+
+  <!-- Toast Container -->
+  <div class="toast-container" id="toast-container"></div>
+
+  <!-- Progress Modal -->
+  <div id="progress-modal" class="modal-overlay">
+    <div class="modal">
+      <div class="modal-header">
+        <h3 id="modal-title">Processing...</h3>
+        <button class="modal-close" id="modal-close" title="Close (process continues in background)">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <div class="progress-section">
+          <div class="progress-bar">
+            <div class="progress-bar-fill" id="progress-fill"></div>
+          </div>
+          <div class="progress-text" id="progress-text">Starting...</div>
+        </div>
+        <div class="progress-details" id="progress-details"></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

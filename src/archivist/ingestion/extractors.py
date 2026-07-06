@@ -454,7 +454,7 @@ def chunk_docx_by_section(path: Path) -> list[str]:
     chunks: list[str] = []
     current: list[str] = []
     for para in doc.paragraphs:
-        if para.style.name.startswith("Heading") and current:
+        if para.style and para.style.name and para.style.name.startswith("Heading") and current:
             chunks.append("\n".join(current))
             current = []
         current.append(para.text)

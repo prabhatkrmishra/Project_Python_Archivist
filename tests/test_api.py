@@ -5,6 +5,7 @@ documents (list/get/delete), archive extraction (zip/7z).
 """
 from __future__ import annotations
 
+import asyncio
 import io
 import zipfile
 from pathlib import Path
@@ -20,7 +21,6 @@ from archivist.config import Settings
 @pytest.fixture(autouse=True)
 def _test_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Point DB paths to temp dir for all tests."""
-    # Create a custom settings with temp paths
     test_settings = Settings(
         data_dir=tmp_path,
         config_dir=tmp_path,
@@ -76,6 +76,19 @@ def _make_7z(files: dict[str, str]) -> bytes:
     finally:
         os.unlink(tmp)
     return data
+
+
+async def _poll_job(client: AsyncClient, job_id: str, max_attempts: int = 100) -> dict:
+    """Poll job status until done or max attempts reached."""
+    for _ in range(max_attempts):
+        await asyncio.sleep(0.1)
+        r = await client.get(f"/api/v1/jobs/{job_id}")
+        assert r.status_code == 200
+        data = r.json()
+        if data["status"] == "done":
+            return data
+        assert data["status"] in ("pending", "running")
+    raise TimeoutError(f"Job {job_id} did not complete in time")
 
 
 # ── Health ────────────────────────────────────────────────────────────────────
@@ -142,7 +155,7 @@ class TestSearch:
         assert r.status_code == 200
 
 
-# ── Ingest: Single File ──────────────────────────────────────────────────────
+# ── Ingest: Single File (synchronous) ─────────────────────────────────────────
 
 
 class TestIngestFile:
@@ -178,13 +191,28 @@ class TestIngestFile:
         data = r.json()
         assert data["files"][0]["status"] == "skipped"
 
+    async def test_ingest_duplicate_file(self, client: AsyncClient, tmp_path: Path):
+        content = _make_text_file("dup.txt", "duplicate content")
+        r1 = await client.post(
+            "/api/v1/ingest/file",
+            files={"file": ("dup.txt", io.BytesIO(content), "text/plain")},
+        )
+        assert r1.status_code == 200
+        assert r1.json()["files"][0]["status"] == "ok"
 
-# ── Ingest: Multi-File ───────────────────────────────────────────────────────
+        r2 = await client.post(
+            "/api/v1/ingest/file",
+            files={"file": ("dup.txt", io.BytesIO(content), "text/plain")},
+        )
+        assert r2.status_code == 200
+        assert r2.json()["files"][0]["status"] == "skipped"
+
+
+# ── Ingest: Multi-File (async) ────────────────────────────────────────────────
 
 
 class TestIngestFiles:
     async def test_ingest_multiple_files(self, client: AsyncClient, tmp_path: Path):
-
         files = [
             ("files", ("a.txt", io.BytesIO(b"file a content"), "text/plain")),
             ("files", ("b.txt", io.BytesIO(b"file b content"), "text/plain")),
@@ -192,20 +220,23 @@ class TestIngestFiles:
         r = await client.post("/api/v1/ingest/files", files=files)
         assert r.status_code == 200
         data = r.json()
+        assert "job_id" in data
         assert data["total_files"] == 2
-        assert data["total_vectors"] >= 2
+
+        job_id = data["job_id"]
+        result = await _poll_job(client, job_id)
+        assert result["result"]["total_vectors"] >= 2
 
     async def test_ingest_no_files(self, client: AsyncClient):
         r = await client.post("/api/v1/ingest/files")
         assert r.status_code in (400, 422)
 
 
-# ── Ingest: Archive ──────────────────────────────────────────────────────────
+# ── Ingest: Archive (async) ───────────────────────────────────────────────────
 
 
 class TestIngestArchive:
     async def test_ingest_zip_archive(self, client: AsyncClient, tmp_path: Path):
-
         zip_data = _make_zip({
             "src/main.py": "def main():\n    print('hello')\n",
             "src/utils.py": "def helper():\n    return 42\n",
@@ -216,26 +247,32 @@ class TestIngestArchive:
         )
         assert r.status_code == 200
         data = r.json()
+        assert "job_id" in data
         assert data["total_files"] == 2
-        assert data["total_vectors"] >= 2
+
+        job_id = data["job_id"]
+        result = await _poll_job(client, job_id)
+        assert result["result"]["total_vectors"] >= 2
 
     async def test_ingest_7z_archive(self, client: AsyncClient, tmp_path: Path):
-
         zip_data = _make_7z({
             "docs/readme.md": "# Hello\nThis is a test.",
             "docs/guide.md": "# Guide\nStep 1, Step 2.",
         })
-
         r = await client.post(
             "/api/v1/ingest/archive",
             files={"file": ("docs.7z", io.BytesIO(zip_data), "application/x-7z-compressed")},
         )
         assert r.status_code == 200
         data = r.json()
+        assert "job_id" in data
         assert data["total_files"] == 2
 
-    async def test_ingest_unsupported_archive(self, client: AsyncClient, tmp_path: Path):
+        job_id = data["job_id"]
+        result = await _poll_job(client, job_id)
+        assert result["result"]["total_files"] == 2
 
+    async def test_ingest_unsupported_archive(self, client: AsyncClient, tmp_path: Path):
         r = await client.post(
             "/api/v1/ingest/archive",
             files={"file": ("file.txt", io.BytesIO(b"not an archive"), "text/plain")},
@@ -244,13 +281,11 @@ class TestIngestArchive:
         assert "Unsupported" in r.json()["detail"]
 
 
-# ── Ingest: Directory ────────────────────────────────────────────────────────
+# ── Ingest: Directory (synchronous) ───────────────────────────────────────────
 
 
 class TestIngestDirectory:
     async def test_ingest_directory(self, client: AsyncClient, tmp_path: Path):
-
-        # Create test files
         d = tmp_path / "mycode"
         d.mkdir()
         (d / "a.py").write_text("def alpha(): pass\n")
@@ -266,7 +301,6 @@ class TestIngestDirectory:
         assert data["total_vectors"] >= 2
 
     async def test_ingest_directory_not_found(self, client: AsyncClient, tmp_path: Path):
-
         r = await client.post(
             "/api/v1/ingest/directory",
             json={"path": str(tmp_path / "nonexistent")},
@@ -274,7 +308,6 @@ class TestIngestDirectory:
         assert r.status_code == 404
 
     async def test_ingest_directory_missing_path(self, client: AsyncClient, tmp_path: Path):
-
         r = await client.post("/api/v1/ingest/directory", json={})
         assert r.status_code == 400
 
@@ -291,8 +324,6 @@ class TestDocuments:
         assert data["documents"] == []
 
     async def test_list_documents_after_ingest(self, client: AsyncClient, tmp_path: Path):
-
-        # Ingest first
         content = _make_text_file("doc.txt", "test content for listing")
         await client.post(
             "/api/v1/ingest/file",
@@ -308,8 +339,6 @@ class TestDocuments:
         assert "file_hash" in doc
 
     async def test_list_documents_pagination(self, client: AsyncClient, tmp_path: Path):
-
-        # Ingest multiple
         for i in range(5):
             content = _make_text_file(f"f{i}.txt", f"content {i}")
             await client.post(
@@ -323,7 +352,6 @@ class TestDocuments:
         assert data["total"] >= 5
 
     async def test_list_documents_filter_ext(self, client: AsyncClient, tmp_path: Path):
-
         for name, content in [("a.py", "py code"), ("b.txt", "text content")]:
             c = _make_text_file(name, content)
             await client.post(
@@ -340,7 +368,6 @@ class TestDocuments:
         assert r.status_code == 404
 
     async def test_delete_document(self, client: AsyncClient, tmp_path: Path):
-
         content = _make_text_file("del.txt", "delete me")
         ingest_r = await client.post(
             "/api/v1/ingest/file",
@@ -348,7 +375,6 @@ class TestDocuments:
         )
         doc_id = ingest_r.json()["files"][0].get("doc_id", "")
         if not doc_id:
-            # Get from list
             list_r = await client.get("/api/v1/documents")
             docs = list_r.json()["documents"]
             doc_id = docs[0]["doc_id"] if docs else None

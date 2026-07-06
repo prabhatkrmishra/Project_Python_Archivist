@@ -11,10 +11,12 @@ import logging
 import os
 import shutil
 import tempfile
+import threading
 import time
+import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 
 from archivist.config import get_settings
 from archivist.ingestion.extractors import iter_files, normalize_for_display
@@ -29,6 +31,7 @@ from .schemas import (
     ErrorResponse,
     IngestedFile,
     IngestResponse,
+    JobStatus,
     SearchResult,
     SearchResponse,
     StatusResponse,
@@ -43,6 +46,69 @@ settings = get_settings()
 def _get_max_bytes() -> int:
     """Return max upload size in bytes."""
     return settings.api_max_upload_mb * 1024 * 1024
+
+
+# ── Async job store ─────────────────────────────────────────────────────────
+_jobs: dict[str, dict] = {}
+_jobs_lock = threading.Lock()
+
+
+def _update_job(job_id: str, **kwargs) -> None:
+    with _jobs_lock:
+        if job_id in _jobs:
+            _jobs[job_id].update(kwargs)
+
+
+def _run_ingest_job(
+    job_id: str,
+    filepaths: list[Path],
+    root_dir: Path,
+) -> None:
+    """Background worker that ingests files and updates progress."""
+    tracker = Tracker(settings.tracker_db)
+    start = time.time()
+    total = len(filepaths)
+    results: list[IngestedFile] = []
+    tmp_dir = _jobs[job_id].get("_tmp_dir")
+
+    _update_job(job_id, status="running", total_files=total, processed_files=0)
+
+    for i, filepath in enumerate(filepaths):
+        rel = str(filepath.relative_to(root_dir)) if filepath.is_relative_to(root_dir) else filepath.name
+        _update_job(
+            job_id, 
+            processed_files=i, 
+            current_file=rel, 
+            elapsed_seconds=round(time.time() - start, 3)
+        )
+
+        try:
+            result = _ingest_single_file(filepath, tracker)
+        except Exception as exc:
+            result = IngestedFile(filename=filepath.name, status="error", vectors=0, error=str(exc))
+        results.append(result)
+
+    elapsed = time.time() - start
+    tracker.close()
+
+    total_vectors = sum(r.vectors for r in results)
+    response = IngestResponse(
+        status="ok",
+        total_files=len(results),
+        total_vectors=total_vectors,
+        elapsed_seconds=round(elapsed, 3),
+        files=results,
+    )
+
+    _update_job(
+        job_id,
+        status="done",
+        processed_files=total,
+        current_file="",
+        elapsed_seconds=elapsed,
+        result=response,
+        _finished_at=time.time(),
+    )
 
 
 def _ingest_single_file(
@@ -64,15 +130,7 @@ def _ingest_single_file(
             )
 
         raw = filepath.read_bytes()
-        text = raw.decode("utf-8", errors="replace")
-        display_text = normalize_for_display(text)
-
-        if not display_text.strip():
-            file_hash = hashlib.sha256(raw).hexdigest()
-            tracker.record(filepath, file_hash)
-            return IngestedFile(
-                filename=filepath.name, status="skipped", vectors=0
-            )
+        file_hash = hashlib.sha256(raw).hexdigest()
 
         from archivist.ingestion.extractors import (
             chunk_text,
@@ -80,7 +138,14 @@ def _ingest_single_file(
             should_chunk,
         )
 
-        file_hash = hashlib.sha256(raw).hexdigest()
+        text = extract_text(filepath)
+        display_text = normalize_for_display(text)
+
+        if not display_text.strip():
+            tracker.record(filepath, file_hash)
+            return IngestedFile(
+                filename=filepath.name, status="skipped", vectors=0
+            )
 
         sq = SQLiteSearch(settings.sqlite_db)
         sq.delete_by_file_hash(file_hash)
@@ -143,7 +208,7 @@ async def search(
     """Search ingested documents with pagination and filters."""
     sq = SQLiteSearch(settings.sqlite_db)
     try:
-        results = sq.search(q, limit=offset + size, all_chunks=all_chunks)
+        results = sq.search(q, limit=max(offset + size, 500), all_chunks=all_chunks)
     finally:
         sq.close()
 
@@ -268,69 +333,49 @@ async def ingest_file(file: UploadFile = File(...)):
 # ── Ingest: Multi-File ───────────────────────────────────────────────────────
 
 
-@router.post(
-    "/ingest/files",
-    response_model=IngestResponse,
-    responses={400: {"model": ErrorResponse}, 413: {"model": ErrorResponse}},
-)
+@router.post("/ingest/files")
 async def ingest_files(files: list[UploadFile] = File(...)):
-    """Ingest multiple files through the extraction pipeline."""
+    """Start async ingestion of multiple files. Returns a job_id to poll for progress."""
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="archivist_upload_"))
-    try:
-        tracker = Tracker(settings.tracker_db)
-        start = time.time()
-        results: list[IngestedFile] = []
+    filepaths: list[Path] = []
 
-        for f in files:
-            content = await f.read()
-            if len(content) > _get_max_bytes():
-                results.append(IngestedFile(
-                    filename=f.filename or "unknown",
-                    status="error",
-                    vectors=0,
-                    error=f"File too large. Max: {settings.api_max_upload_mb}MB",
-                ))
-                continue
+    for f in files:
+        content = await f.read()
+        filename = f.filename or "unknown.txt"
+        filepath = tmp_dir / filename
+        filepath.write_bytes(content)
+        filepaths.append(filepath)
 
-            filename = f.filename or "unknown.txt"
-            filepath = tmp_dir / filename
-            filepath.write_bytes(content)
-            result = _ingest_single_file(filepath, tracker)
-            results.append(result)
-            filepath.unlink(missing_ok=True)
+    job_id = uuid.uuid4().hex
+    _jobs[job_id] = {
+        "job_id": job_id,
+        "status": "pending",
+        "total_files": len(filepaths),
+        "processed_files": 0,
+        "current_file": "",
+        "elapsed_seconds": 0.0,
+        "error": None,
+        "result": None,
+        "_tmp_dir": tmp_dir,
+    }
 
-        elapsed = time.time() - start
-        tracker.close()
+    thread = threading.Thread(
+        target=_run_ingest_job, args=(job_id, filepaths, tmp_dir), daemon=True
+    )
+    thread.start()
 
-        total_vectors = sum(r.vectors for r in results)
-        return IngestResponse(
-            status="ok",
-            total_files=len(results),
-            total_vectors=total_vectors,
-            elapsed_seconds=round(elapsed, 3),
-            files=results,
-        )
-    finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+    return {"job_id": job_id, "total_files": len(filepaths)}
 
 
 # ── Ingest: Archive ──────────────────────────────────────────────────────────
 
 
-@router.post(
-    "/ingest/archive",
-    response_model=IngestResponse,
-    responses={
-        400: {"model": ErrorResponse},
-        413: {"model": ErrorResponse},
-        422: {"model": ErrorResponse},
-    },
-)
+@router.post("/ingest/archive")
 async def ingest_archive(file: UploadFile = File(...)):
-    """Ingest an archive (zip, rar, 7z). Extracts and ingests each file."""
+    """Start async archive ingestion. Returns a job_id to poll for progress."""
     content = await file.read()
     if len(content) > _get_max_bytes():
         raise HTTPException(
@@ -340,6 +385,7 @@ async def ingest_archive(file: UploadFile = File(...)):
 
     filename = file.filename or "archive.zip"
     tmp_dir = Path(tempfile.mkdtemp(prefix="archivist_archive_"))
+
     try:
         try:
             extracted_files = extract_archive(content, filename, dest=tmp_dir)
@@ -347,35 +393,32 @@ async def ingest_archive(file: UploadFile = File(...)):
             raise HTTPException(status_code=400, detail=str(e))
 
         if not extracted_files:
-            return IngestResponse(
-                status="ok",
-                total_files=0,
-                total_vectors=0,
-                elapsed_seconds=0.0,
-                files=[],
-            )
+            return {"job_id": None, "total_files": 0}
 
-        tracker = Tracker(settings.tracker_db)
-        start = time.time()
-        results: list[IngestedFile] = []
+        job_id = uuid.uuid4().hex
+        _jobs[job_id] = {
+            "job_id": job_id,
+            "status": "pending",
+            "total_files": len(extracted_files),
+            "processed_files": 0,
+            "current_file": "",
+            "elapsed_seconds": 0.0,
+            "error": None,
+            "result": None,
+            "_tmp_dir": tmp_dir,
+        }
 
-        for filepath in extracted_files:
-            result = _ingest_single_file(filepath, tracker)
-            results.append(result)
-
-        elapsed = time.time() - start
-        tracker.close()
-
-        total_vectors = sum(r.vectors for r in results)
-        return IngestResponse(
-            status="ok",
-            total_files=len(results),
-            total_vectors=total_vectors,
-            elapsed_seconds=round(elapsed, 3),
-            files=results,
+        thread = threading.Thread(
+            target=_run_ingest_job,
+            args=(job_id, extracted_files, tmp_dir),
+            daemon=True,
         )
-    finally:
+        thread.start()
+
+        return {"job_id": job_id, "total_files": len(extracted_files)}
+    except HTTPException:
         shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
 
 
 # ── Ingest: Directory ────────────────────────────────────────────────────────
@@ -419,6 +462,62 @@ async def ingest_directory(body: dict):
         elapsed_seconds=round(elapsed, 3),
         files=results,
     )
+
+
+@router.post("/ingest/directory/upload")
+async def ingest_directory_upload(
+    files: list[UploadFile] = File(...),
+    paths: str = Form(...),
+):
+    """Start async folder ingestion. Returns a job_id to poll for progress."""
+    relative_paths = paths.split("\n")
+
+    if len(files) != len(relative_paths):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Mismatch: {len(files)} files but {len(relative_paths)} paths",
+        )
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="archivist_dirupload_"))
+    filepaths: list[Path] = []
+
+    # Save files preserving directory structure
+    for f, rel_path in zip(files, relative_paths):
+        rel_path = rel_path.strip()
+        if not rel_path:
+            continue
+        dest = tmp_dir / rel_path
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        content = await f.read()
+        dest.write_bytes(content)
+        filepaths.append(dest)
+
+    # Find the root folder
+    first_rel = relative_paths[0].strip()
+    parts = first_rel.split("/")
+    root_dir = tmp_dir / parts[0] if len(parts) > 1 else tmp_dir
+    if not root_dir.is_dir():
+        root_dir = tmp_dir
+
+    job_id = uuid.uuid4().hex
+    _jobs[job_id] = {
+        "job_id": job_id,
+        "status": "pending",
+        "total_files": len(filepaths),
+        "processed_files": 0,
+        "current_file": "",
+        "elapsed_seconds": 0.0,
+        "error": None,
+        "result": None,
+        "_tmp_dir": tmp_dir,
+    }
+
+    thread = threading.Thread(
+        target=_run_ingest_job, args=(job_id, filepaths, root_dir), daemon=True
+    )
+    thread.start()
+
+    return {"job_id": job_id, "total_files": len(filepaths)}
 
 
 # ── Documents ─────────────────────────────────────────────────────────────────
@@ -472,12 +571,30 @@ async def list_documents(
             ingested_at=r[6],
             file_hash=r[7],
         )
-        for r in page
+    for r in page
     ]
 
     return DocumentsResponse(
         total=total, offset=offset, limit=limit, documents=documents
     )
+
+
+@router.get("/documents/extensions", response_model=list[str])
+async def list_extensions():
+    """Return distinct file extensions from the documents index."""
+    sq = SQLiteSearch(settings.sqlite_db)
+    try:
+        rows = sq.conn.execute(
+            "SELECT DISTINCT filepath FROM documents ORDER BY filepath"
+        ).fetchall()
+    finally:
+        sq.close()
+    exts = set()
+    for r in rows:
+        ext = Path(r[0]).suffix.lower()
+        if ext:
+            exts.add(ext)
+    return sorted(exts)
 
 
 @router.get(
@@ -544,3 +661,58 @@ async def delete_documents_by_hash(
     finally:
         sq.close()
     return {"status": "deleted", "file_hash": file_hash}
+
+
+@router.delete(
+    "/documents/all",
+    responses={200: {"description": "All documents deleted"}},
+)
+async def delete_all_documents():
+    """Delete all documents and clear the index completely."""
+    sq = SQLiteSearch(settings.sqlite_db)
+    try:
+        sq.delete_all()
+        sq.conn.execute("VACUUM")
+    finally:
+        sq.close()
+
+    tracker = Tracker(settings.tracker_db)
+    tracker.clear()
+    tracker._conn.execute("VACUUM")
+    tracker.close()
+
+    return {"status": "deleted", "message": "All documents cleared"}
+
+
+@router.get("/jobs/{job_id}", response_model=JobStatus)
+async def get_job_status(job_id: str):
+    """Poll for async job progress."""
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    # Build response (exclude internal keys)
+    response = JobStatus(
+        job_id=job["job_id"],
+        status=job["status"],
+        total_files=job["total_files"],
+        processed_files=job["processed_files"],
+        current_file=job["current_file"],
+        elapsed_seconds=job["elapsed_seconds"],
+        error=job["error"],
+        result=job["result"],
+    )
+
+    # Clean up done jobs after 30 seconds
+    if job["status"] in ("done", "error"):
+        elapsed = time.time() - job.get("_finished_at", time.time())
+        if elapsed > 30:
+            with _jobs_lock:
+                _jobs.pop(job_id, None)
+            tmp = job.get("_tmp_dir")
+            if tmp and tmp.exists():
+                shutil.rmtree(tmp, ignore_errors=True)
+
+    return response
