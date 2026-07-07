@@ -1,4 +1,4 @@
-const API = "http://127.0.0.1:8000/api/v1";
+const API = "https://project-tooldev-archivist.onrender.com/api/v1";
 const VALID_TABS = ["search", "ingest", "documents", "status"];
 
 // ── Helpers ────────────────────────────────────────────────────────────────
