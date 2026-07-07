@@ -29,6 +29,26 @@ function escapeHtml(s) {
   return d.innerHTML;
 }
 
+function buildErrorSummary(files) {
+  if (!files) return [];
+  const counts = {};
+  for (const f of files) {
+    if (f.status === "error" && f.error) {
+      counts[f.error] = (counts[f.error] || 0) + 1;
+    }
+  }
+  return Object.entries(counts)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5)
+    .map(([msg, n]) => {
+      const label = n === 1 ? "file" : "files";
+      const extMatch = msg.match(/\(([^)]*)\)/);
+      const ext = extMatch ? extMatch[1] : "";
+      const reason = ext || "no extension";
+      return `<strong>${n}</strong> ${label} not supported (<strong>${escapeHtml(reason)}</strong>)`;
+    });
+}
+
 function getExt(name) {
   return (name.split(".").pop() || "").toLowerCase();
 }
@@ -183,12 +203,14 @@ function updateProgress(data) {
     const ok = data.result?.files?.filter((f) => f.status === "ok").length || 0;
     const err = data.result?.files?.filter((f) => f.status === "error").length || 0;
     const skip = data.result?.files?.filter((f) => f.status === "skipped").length || 0;
-    details.innerHTML = `
-      <div class="progress-line ok">✓ ${ok} ingested</div>
-      ${skip ? `<div class="progress-line">⊘ ${skip} skipped</div>` : ""}
-      ${err ? `<div class="progress-line err">✗ ${err} errors</div>` : ""}
-      <div class="progress-summary">Done in ${elapsed}s — ${data.result?.total_vectors || 0} vectors created</div>
-    `;
+      const errorItems = buildErrorSummary(data.result?.files);
+      details.innerHTML = `
+        <div class="progress-line ok">✓ ${ok} Ingested into database</div>
+        ${skip ? `<div class="progress-line">⊘ ${skip} Skipped</div>` : ""}
+        ${err ? `<div class="progress-line err">✗ ${err} File errors</div>` : ""}
+        ${err && errorItems.length ? `<div class="progress-detail">${errorItems.map(e => `&nbsp;&nbsp;-> ${e}`).join("<br>")}</div>` : ""}
+        <div class="progress-summary">Done in ${elapsed}s — ${data.result?.total_vectors || 0} vectors created</div>
+      `;
     document.getElementById("progress-text").textContent = "Complete!";
     document.getElementById("progress-fill").style.width = "100%";
   } else if (data.status === "error") {
@@ -215,7 +237,7 @@ function startPolling(jobId, label, onDone) {
         if (onDone) onDone(data);
         setTimeout(() => {
           if (document.getElementById("progress-modal").classList.contains("active")) closeModal();
-        }, 3000);
+        }, 10000);
       }
     } catch {
       clearInterval(timer);

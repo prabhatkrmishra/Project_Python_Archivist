@@ -389,7 +389,9 @@ def extract_text(path: Path) -> str:
     # All text and code files — read as plain text
     if ext in SUPPORTED_EXTENSIONS:
         return extract_txt(path)
-    raise UnsupportedFileType(f"Unsupported file type: {ext}")
+    raise UnsupportedFileType(
+        f"not supported ({ext})"
+    )
 
 
 def should_chunk(path: Path, text: str) -> bool:
