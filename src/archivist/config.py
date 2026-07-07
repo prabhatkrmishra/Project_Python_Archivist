@@ -33,7 +33,6 @@ class Settings(BaseSettings):
         api_workers: Number of Uvicorn workers.
         api_key: API authentication key (None = no auth).
         data_dir: Storage directory for SQLite database and tracker.
-        config_dir: Configuration directory.
     """
 
     model_config = SettingsConfigDict(
@@ -64,7 +63,6 @@ class Settings(BaseSettings):
 
     # Storage Paths
     data_dir: Path = Path.home() / ".local" / "share" / "archivist"
-    config_dir: Path = Path.home() / ".config" / "archivist"
 
     @property
     def tracker_db(self) -> Path:
@@ -79,7 +77,6 @@ class Settings(BaseSettings):
     def ensure_dirs(self) -> None:
         """Create required directories if they don't exist."""
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        self.config_dir.mkdir(parents=True, exist_ok=True)
 
 
 def get_settings() -> Settings:

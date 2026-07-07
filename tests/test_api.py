@@ -23,7 +23,6 @@ def _test_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Point DB paths to temp dir for all tests."""
     test_settings = Settings(
         data_dir=tmp_path,
-        config_dir=tmp_path,
     )
 
     monkeypatch.setattr("archivist.api.routes.settings", test_settings)

@@ -246,10 +246,36 @@ class SQLiteSearch:
         """Return collection statistics.
 
         Returns:
-            Dictionary with points_count and backend info.
+            Dictionary with points_count, backend, unique_files,
+            total_content_size_bytes, unique_extensions, last_ingested_at.
         """
         count = self.conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
-        return {"points_count": count, "backend": "sqlite-fts5"}
+
+        # Group by file_hash first so a file's size/extension/timestamp is
+        # only counted once, not once per chunk.
+        row = self.conn.execute(
+            """
+            SELECT COUNT(*), COALESCE(SUM(file_size), 0), MAX(ingested_at)
+            FROM (
+                SELECT file_hash, MAX(file_size) AS file_size, MAX(ingested_at) AS ingested_at
+                FROM documents
+                GROUP BY file_hash
+            )
+            """
+        ).fetchone()
+        unique_files, total_size, last_ingested_at = row
+
+        ext_rows = self.conn.execute("SELECT DISTINCT filepath FROM documents").fetchall()
+        extensions = {Path(r[0]).suffix.lower() for r in ext_rows if Path(r[0]).suffix}
+
+        return {
+            "points_count": count,
+            "backend": "sqlite-fts5",
+            "unique_files": unique_files,
+            "total_content_size_bytes": total_size,
+            "unique_extensions": len(extensions),
+            "last_ingested_at": last_ingested_at,
+        }
 
     def close(self):
         """Close the database connection."""

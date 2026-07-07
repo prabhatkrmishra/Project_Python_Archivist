@@ -10,7 +10,6 @@ COPY src/ src/
 RUN pip install --no-cache-dir .
 
 ENV DATA_DIR=/home/user/archivist
-ENV CONFIG_DIR=/home/user/archivist
 ENV VECTORIZER_N_FEATURES=1048576
 ENV HOME=/home/user
 
