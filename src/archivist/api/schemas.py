@@ -101,6 +101,10 @@ class StatusResponse(BaseModel):
     backend: str
     tracker_files: int
     db_size_bytes: int
+    unique_files: int = 0
+    total_content_size_bytes: int = 0
+    unique_extensions: int = 0
+    last_ingested_at: str | None = None
 
 
 # ── Errors ────────────────────────────────────────────────────────────────────

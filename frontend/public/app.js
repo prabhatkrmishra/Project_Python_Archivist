@@ -8,6 +8,21 @@ function formatBytes(bytes) {
   return (bytes / 1048576).toFixed(1) + " MB";
 }
 
+function formatRelativeTime(isoString) {
+  if (!isoString) return "Never";
+  const then = new Date(isoString.endsWith("Z") ? isoString : isoString + "Z");
+  if (isNaN(then.getTime())) return isoString;
+  const diffMs = Date.now() - then.getTime();
+  const mins = Math.floor(diffMs / 60000);
+  if (mins < 1) return "Just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days}d ago`;
+  return then.toLocaleDateString();
+}
+
 function escapeHtml(s) {
   const d = document.createElement("div");
   d.textContent = s;
@@ -1208,12 +1223,9 @@ document.addEventListener("click", (e) => {
 // ── Status Dashboard ──────────────────────────────────────────────────────
 async function loadStatus() {
   const el = document.getElementById("status-cards");
-  el.innerHTML = `
-    <div class="stat-card"><div class="skeleton skeleton-text short"></div><div class="skeleton skeleton-text medium"></div></div>
-    <div class="stat-card"><div class="skeleton skeleton-text short"></div><div class="skeleton skeleton-text medium"></div></div>
-    <div class="stat-card"><div class="skeleton skeleton-text short"></div><div class="skeleton skeleton-text medium"></div></div>
-    <div class="stat-card"><div class="skeleton skeleton-text short"></div><div class="skeleton skeleton-text medium"></div></div>
-  `;
+  el.innerHTML = Array(6).fill(
+    `<div class="stat-card"><div class="skeleton skeleton-text short"></div><div class="skeleton skeleton-text medium"></div></div>`
+  ).join("");
 
   try {
     const res = await fetch(`${API}/status?t=${Date.now()}`);
@@ -1222,8 +1234,11 @@ async function loadStatus() {
     const stats = [
       { label: "Indexed Chunks", value: data.points_count?.toLocaleString() || "0", icon: "📄", color: "var(--accent)" },
       { label: "Tracked Files", value: data.tracker_files?.toLocaleString() || "0", icon: "📁", color: "var(--success)" },
+      { label: "Unique Files", value: data.unique_files?.toLocaleString() || "0", icon: "🗂️", color: "var(--info)" },
+      { label: "File Types", value: data.unique_extensions?.toLocaleString() || "0", icon: "🏷️", color: "var(--warning)" },
+      { label: "Content Size", value: formatBytes(data.total_content_size_bytes || 0), icon: "📦", color: "var(--accent)" },
       { label: "DB Size", value: formatBytes(data.db_size_bytes || 0), icon: "💾", color: "var(--warning)" },
-      { label: "Backend", value: data.backend || "unknown", icon: "⚙️", color: "var(--info)" },
+      { label: "Last Ingested", value: formatRelativeTime(data.last_ingested_at), icon: "🕒", color: "var(--success)" },
     ];
 
     el.innerHTML = stats.map(s => `

@@ -296,6 +296,10 @@ async def status():
         backend=stats.get("backend", "unknown"),
         tracker_files=tracker_stats.get("indexed_files", 0),
         db_size_bytes=db_size,
+        unique_files=stats.get("unique_files", 0),
+        total_content_size_bytes=stats.get("total_content_size_bytes", 0),
+        unique_extensions=stats.get("unique_extensions", 0),
+        last_ingested_at=stats.get("last_ingested_at"),
     )
 
 
