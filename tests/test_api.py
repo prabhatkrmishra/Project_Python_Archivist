@@ -14,7 +14,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from archivist.api.archives import ArchiveError, _is_safe_path, extract_archive, is_archive
-from archivist.api.main import create_app
+from archivist.main import create_app
 from archivist.config import Settings
 
 

@@ -24,7 +24,7 @@ from archivist.ingestion.tracker import Tracker
 from archivist.search.sqlite_search import SQLiteSearch
 from archivist.utils.text import extract_snippet
 
-from .archives import ArchiveError, extract_archive, is_archive
+from .archives import ArchiveError, analyze_archive, extract_archive, is_archive
 from .schemas import (
     DocumentInfo,
     DocumentsResponse,
@@ -83,7 +83,7 @@ def _run_ingest_job(
         )
 
         try:
-            result = _ingest_single_file(filepath, tracker)
+            result = _ingest_single_file(filepath, tracker, root_dir=root_dir)
         except Exception as exc:
             result = IngestedFile(filename=filepath.name, status="error", vectors=0, error=str(exc))
         results.append(result)
@@ -112,17 +112,27 @@ def _run_ingest_job(
 
 
 def _ingest_single_file(
-    filepath: Path, tracker: Tracker
+    filepath: Path, tracker: Tracker, root_dir: Path | None = None
 ) -> IngestedFile:
     """Ingest a single file through the proper pipeline.
 
     Args:
         filepath: Path to file to ingest.
         tracker: Tracker instance for idempotency.
+        root_dir: If given, the stored filepath is relative to this
+            directory instead of the absolute on-disk path. Used to strip
+            throwaway temp-upload/extraction directories (e.g.
+            `archivist_archive_xxxxx`) from what gets shown/stored, so
+            only the meaningful path inside the upload/archive remains.
 
     Returns:
         IngestedFile with status details.
     """
+    if root_dir is not None and filepath.is_relative_to(root_dir):
+        display_filepath = str(filepath.relative_to(root_dir))
+    else:
+        display_filepath = str(filepath)
+
     try:
         if tracker.is_indexed(filepath):
             return IngestedFile(
@@ -163,7 +173,7 @@ def _ingest_single_file(
             line_offset = i * 1500
             sq.upsert({
                 "doc_id": doc_id,
-                "filepath": str(filepath),
+                "filepath": display_filepath,
                 "filename": filepath.name,
                 "content": chunk_content,
                 "line_offset": line_offset,
@@ -315,7 +325,7 @@ async def ingest_file(file: UploadFile = File(...)):
 
         tracker = Tracker(settings.tracker_db)
         start = time.time()
-        result = _ingest_single_file(filepath, tracker)
+        result = _ingest_single_file(filepath, tracker, root_dir=tmp_dir)
         elapsed = time.time() - start
         tracker.close()
 
@@ -371,6 +381,28 @@ async def ingest_files(files: list[UploadFile] = File(...)):
 
 
 # ── Ingest: Archive ──────────────────────────────────────────────────────────
+
+
+@router.post("/archive/analyze")
+async def analyze_archive_upload(file: UploadFile = File(...)):
+    """Validate an archive and summarize its contents without extracting it.
+
+    Used by the "Analyzing archive..." step in the UI right after a file is
+    selected, so the user gets real, immediate feedback (valid/invalid,
+    file count, size) before committing to the full extraction + ingest.
+    """
+    content = await file.read()
+    if len(content) > _get_max_bytes():
+        return {
+            "valid": False,
+            "format": Path(file.filename or "").suffix.lower(),
+            "file_count": 0,
+            "total_size": 0,
+            "error": f"Archive too large. Max size: {settings.api_max_upload_mb}MB",
+        }
+
+    filename = file.filename or "archive.zip"
+    return analyze_archive(content, filename)
 
 
 @router.post("/ingest/archive")
@@ -492,12 +524,11 @@ async def ingest_directory_upload(
         dest.write_bytes(content)
         filepaths.append(dest)
 
-    # Find the root folder
-    first_rel = relative_paths[0].strip()
-    parts = first_rel.split("/")
-    root_dir = tmp_dir / parts[0] if len(parts) > 1 else tmp_dir
-    if not root_dir.is_dir():
-        root_dir = tmp_dir
+    # Use tmp_dir as the root so the selected folder's own name (the first
+    # path segment of each relative path, e.g. "zygisk") is preserved in
+    # the stored/displayed filepath instead of being stripped along with
+    # the throwaway temp dir prefix.
+    root_dir = tmp_dir
 
     job_id = uuid.uuid4().hex
     _jobs[job_id] = {
@@ -634,17 +665,36 @@ async def get_document(doc_id: str):
 
 
 @router.delete(
-    "/documents/{doc_id}",
-    responses={200: {"description": "Deleted"}},
+    "/documents/all",
+    responses={200: {"description": "All documents deleted"}},
 )
-async def delete_document(doc_id: str):
-    """Delete a document by its ID."""
+async def delete_all_documents():
+    """Delete all documents and clear the index completely.
+
+    Exactly mirrors `archivist clear --confirm`: closes both database
+    connections, then removes the search db and tracker db files from
+    disk entirely (plus their -wal/-shm sidecar files, since both run in
+    WAL mode), rather than deleting rows in place. Both files are
+    recreated fresh, empty, the next time anything connects to them.
+
+    NOTE: this route must stay registered before /documents/{doc_id}
+    below - FastAPI matches routes in registration order, and the
+    parameterized route would otherwise swallow "all" as a doc_id.
+    """
     sq = SQLiteSearch(settings.sqlite_db)
-    try:
-        sq.delete(doc_id)
-    finally:
-        sq.close()
-    return {"status": "deleted", "id": doc_id}
+    sq.delete_all()
+    sq.close()
+
+    tracker = Tracker(settings.tracker_db)
+    tracker.close()
+
+    for db_path in (settings.sqlite_db, settings.tracker_db):
+        for suffix in ("", "-wal", "-shm"):
+            path = db_path.with_name(db_path.name + suffix)
+            if path.exists():
+                os.remove(path)
+
+    return {"status": "deleted", "message": "All documents cleared"}
 
 
 @router.delete(
@@ -664,24 +714,17 @@ async def delete_documents_by_hash(
 
 
 @router.delete(
-    "/documents/all",
-    responses={200: {"description": "All documents deleted"}},
+    "/documents/{doc_id}",
+    responses={200: {"description": "Deleted"}},
 )
-async def delete_all_documents():
-    """Delete all documents and clear the index completely."""
+async def delete_document(doc_id: str):
+    """Delete a document by its ID."""
     sq = SQLiteSearch(settings.sqlite_db)
     try:
-        sq.delete_all()
-        sq.conn.execute("VACUUM")
+        sq.delete(doc_id)
     finally:
         sq.close()
-
-    tracker = Tracker(settings.tracker_db)
-    tracker.clear()
-    tracker._conn.execute("VACUUM")
-    tracker.close()
-
-    return {"status": "deleted", "message": "All documents cleared"}
+    return {"status": "deleted", "id": doc_id}
 
 
 @router.get("/jobs/{job_id}", response_model=JobStatus)

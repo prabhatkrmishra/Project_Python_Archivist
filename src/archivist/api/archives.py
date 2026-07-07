@@ -13,6 +13,26 @@ logger = logging.getLogger(__name__)
 # Supported archive extensions
 ARCHIVE_EXTENSIONS = {".zip", ".rar", ".7z"}
 
+# Magic-byte signatures for each format. Extensions are just filenames and
+# can be renamed/spoofed trivially (e.g. a plain text file saved as
+# "notes.zip"), so before we ever hand file bytes to zipfile/py7zr/rarfile
+# we verify the actual content starts with a valid header for the format
+# it claims to be. This is a pure-Python check - no extra dependency.
+_MAGIC_SIGNATURES: dict[str, tuple[bytes, ...]] = {
+    ".zip": (
+        b"PK\x03\x04",  # normal archive with at least one entry
+        b"PK\x05\x06",  # empty archive (end-of-central-directory only)
+        b"PK\x07\x08",  # spanned/multi-volume archive marker
+    ),
+    ".7z": (
+        b"7z\xbc\xaf\x27\x1c",  # 6-byte 7z signature
+    ),
+    ".rar": (
+        b"Rar!\x1a\x07\x00",  # RAR 1.5 - 4.x
+        b"Rar!\x1a\x07\x01\x00",  # RAR 5.0+
+    ),
+}
+
 # Max files to extract from a single archive
 _MAX_ARCHIVE_FILES = 5000
 
@@ -20,6 +40,36 @@ _MAX_ARCHIVE_FILES = 5000
 class ArchiveError(Exception):
     """Raised when archive extraction fails."""
     pass
+
+
+def _validate_signature(file_bytes: bytes, suffix: str) -> None:
+    """Verify the file's magic bytes actually match its claimed format.
+
+    A file extension is just a name and proves nothing about the content -
+    this checks the real header bytes so a mislabeled or corrupted file is
+    rejected up front, before any extraction library touches it.
+
+    Args:
+        file_bytes: Raw file bytes as uploaded.
+        suffix: Lowercased file extension, e.g. ".zip".
+
+    Raises:
+        ArchiveError: If the content's signature doesn't match any valid
+            header for the claimed format (or the file is empty/truncated).
+    """
+    signatures = _MAGIC_SIGNATURES.get(suffix)
+    if not signatures:
+        return
+
+    if not file_bytes:
+        raise ArchiveError(f"File is empty - not a valid {suffix} archive.")
+
+    if not any(file_bytes.startswith(sig) for sig in signatures):
+        raise ArchiveError(
+            f"File has a {suffix} extension but its contents don't match a "
+            f"valid {suffix} archive header. It may be corrupted, "
+            f"truncated, or not actually a {suffix} file."
+        )
 
 
 def _is_safe_path(dest: Path, member_name: str) -> bool:
@@ -37,6 +87,188 @@ def _is_safe_path(dest: Path, member_name: str) -> bool:
         return str(resolved).startswith(str(dest.resolve()))
     except (ValueError, OSError):
         return False
+
+
+def analyze_archive(file_bytes: bytes, filename: str) -> dict:
+    """Validate an archive and summarize its contents without extracting to disk.
+
+    This is the real safety check behind the "Analyzing archive..." step in
+    the UI: it verifies the magic-byte signature, confirms the archive
+    actually opens and its internal structure is intact (catching corrupt
+    or truncated files that pass the signature check but are still broken),
+    and reports how many files it contains - all before the user commits to
+    a full extraction/ingest.
+
+    Args:
+        file_bytes: Raw file bytes as uploaded.
+        filename: Original filename (used to detect format).
+
+    Returns:
+        Dict with:
+            valid (bool): whether the archive is safe to ingest.
+            format (str): detected extension, e.g. ".zip".
+            file_count (int): number of files inside (0 if invalid).
+            total_size (int): total uncompressed size in bytes (0 if invalid).
+            error (str | None): human-readable reason if invalid.
+    """
+    suffix = Path(filename).suffix.lower()
+
+    if suffix not in ARCHIVE_EXTENSIONS:
+        return {
+            "valid": False,
+            "format": suffix,
+            "file_count": 0,
+            "total_size": 0,
+            "error": (
+                f"Unsupported archive format: {suffix}. "
+                f"Supported: {', '.join(sorted(ARCHIVE_EXTENSIONS))}"
+            ),
+        }
+
+    try:
+        _validate_signature(file_bytes, suffix)
+    except ArchiveError as e:
+        return {
+            "valid": False,
+            "format": suffix,
+            "file_count": 0,
+            "total_size": 0,
+            "error": str(e),
+        }
+
+    try:
+        if suffix == ".zip":
+            file_count, total_size = _analyze_zip(file_bytes)
+        elif suffix == ".7z":
+            file_count, total_size = _analyze_7z(file_bytes)
+        else:  # ".rar"
+            file_count, total_size = _analyze_rar(file_bytes)
+    except ArchiveError as e:
+        return {
+            "valid": False,
+            "format": suffix,
+            "file_count": 0,
+            "total_size": 0,
+            "error": str(e),
+        }
+
+    if file_count > _MAX_ARCHIVE_FILES:
+        return {
+            "valid": False,
+            "format": suffix,
+            "file_count": file_count,
+            "total_size": total_size,
+            "error": f"Archive contains {file_count} files, max is {_MAX_ARCHIVE_FILES}",
+        }
+
+    if file_count == 0:
+        return {
+            "valid": False,
+            "format": suffix,
+            "file_count": 0,
+            "total_size": 0,
+            "error": "Archive is valid but contains no files.",
+        }
+
+    return {
+        "valid": True,
+        "format": suffix,
+        "file_count": file_count,
+        "total_size": total_size,
+        "error": None,
+    }
+
+
+def _analyze_zip(file_bytes: bytes) -> tuple[int, int]:
+    """Open a zip in-memory, verify integrity, and count/size its members."""
+    try:
+        zf = zipfile.ZipFile(BytesIO(file_bytes))
+    except zipfile.BadZipFile as e:
+        raise ArchiveError(f"Invalid ZIP file: {e}") from e
+
+    bad_member = zf.testzip()
+    if bad_member is not None:
+        zf.close()
+        raise ArchiveError(f"Corrupt file inside archive: {bad_member}")
+
+    members = [m for m in zf.infolist() if not m.filename.endswith("/")]
+    file_count = len(members)
+    total_size = sum(m.file_size for m in members)
+    zf.close()
+    return file_count, total_size
+
+
+def _analyze_7z(file_bytes: bytes) -> tuple[int, int]:
+    """Open a 7z in a scratch temp file, verify integrity, count/size members."""
+    try:
+        import py7zr
+    except ImportError:
+        raise ArchiveError("7z support requires py7zr: pip install py7zr")
+
+    with tempfile.NamedTemporaryFile(suffix=".7z", delete=False) as tmp:
+        tmp.write(file_bytes)
+        tmp_path = tmp.name
+
+    try:
+        try:
+            archive = py7zr.SevenZipFile(tmp_path, mode="r")
+        except py7zr.Bad7zFile as e:
+            raise ArchiveError(f"Invalid 7z file: {e}") from e
+
+        if archive.testzip() is not None:
+            archive.close()
+            raise ArchiveError("Corrupt file inside archive")
+
+        infos = [i for i in archive.list() if not i.is_directory]
+        file_count = len(infos)
+        total_size = sum(i.uncompressed for i in infos)
+        archive.close()
+        return file_count, total_size
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+
+def _analyze_rar(file_bytes: bytes) -> tuple[int, int]:
+    """Open a rar in a scratch temp file, verify integrity, count/size members."""
+    try:
+        import rarfile
+    except ImportError:
+        raise ArchiveError("RAR support requires rarfile: pip install rarfile")
+
+    try:
+        unrar_tool = rarfile.UNRAR_TOOL
+        if not unrar_tool:
+            raise ArchiveError("unrar binary not found")
+    except ArchiveError:
+        raise
+    except Exception:
+        raise ArchiveError(
+            "RAR support requires unrar binary. "
+            "Install from http://www.rarlab.com/rar_add.htm or skip RAR files."
+        )
+
+    with tempfile.NamedTemporaryFile(suffix=".rar", delete=False) as tmp:
+        tmp.write(file_bytes)
+        tmp_path = tmp.name
+
+    try:
+        try:
+            rf = rarfile.RarFile(tmp_path)
+        except rarfile.Error as e:
+            raise ArchiveError(f"Invalid RAR file: {e}") from e
+
+        bad_member = rf.testrar()
+        if bad_member is not None:
+            rf.close()
+            raise ArchiveError(f"Corrupt file inside archive: {bad_member}")
+
+        infos = [i for i in rf.infolist() if not i.is_dir()]
+        file_count = len(infos)
+        total_size = sum(i.file_size for i in infos)
+        rf.close()
+        return file_count, total_size
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
 
 
 def _extract_zip(data: bytes, dest: Path) -> list[Path]:
@@ -212,6 +444,8 @@ def extract_archive(file_bytes: bytes, filename: str, dest: Path | None = None) 
             f"Unsupported archive format: {suffix}. "
             f"Supported: {', '.join(sorted(ARCHIVE_EXTENSIONS))}"
         )
+
+    _validate_signature(file_bytes, suffix)
 
     if dest is None:
         dest = Path(tempfile.mkdtemp(prefix="archivist_archive_"))

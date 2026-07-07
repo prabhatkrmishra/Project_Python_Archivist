@@ -419,9 +419,14 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
-// ── Ingest: Files ─────────────────────────────────────────────────────────
-let uploadFiles = [];
+// ── Ingest: Unified Upload (Files / Folder / Archive) ────────────────────
 let activeUploadCount = 0;
+let uploadMode = "files"; // "files" | "folder" | "archive"
+let uploadFiles = [];     // used for "files" and "folder" modes
+let archiveFile = null;   // used for "archive" mode
+let archiveAnalysis = null; // result of the last /archive/analyze call
+let archiveAnalyzeToken = 0; // guards against stale responses if the file changes mid-request
+const ARCHIVE_EXTS = ["zip", "7z", "rar"];
 
 function updateUploadIndicator() {
   const indicator = document.getElementById("upload-indicator");
@@ -432,63 +437,233 @@ function updateUploadIndicator() {
   }
 }
 
-function initDropZone(dropId, inputId, listId, btnId, clearId, onUpload) {
-  const drop = document.getElementById(dropId);
-  const input = document.getElementById(inputId);
-  const list = document.getElementById(listId);
-  const btn = document.getElementById(btnId);
-  const clr = document.getElementById(clearId);
+// Recursively walks a dropped FileSystemEntry (file or directory), returning
+// a flat array of File objects with webkitRelativePath populated so folder
+// structure survives drag-and-drop the same way a webkitdirectory <input> does.
+function readEntry(entry, basePath = "") {
+  return new Promise((resolve) => {
+    if (entry.isFile) {
+      entry.file((file) => {
+        const relPath = basePath + file.name;
+        try {
+          Object.defineProperty(file, "webkitRelativePath", { value: relPath, configurable: true });
+        } catch {
+          // Some browsers don't allow overriding; fall back to file.name elsewhere.
+        }
+        resolve([file]);
+      }, () => resolve([]));
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      let collected = [];
+      const readBatch = () => {
+        reader.readEntries(async (entries) => {
+          if (!entries.length) {
+            const nested = await Promise.all(collected.map((e) => readEntry(e, basePath + entry.name + "/")));
+            resolve(nested.flat());
+          } else {
+            collected = collected.concat(entries);
+            readBatch(); // readEntries must be called repeatedly until it returns empty
+          }
+        }, () => resolve([]));
+      };
+      readBatch();
+    } else {
+      resolve([]);
+    }
+  });
+}
+
+// Reads a DataTransferItemList from a drop event, expanding any directories.
+async function expandDataTransferItems(items) {
+  const entries = Array.from(items)
+    .map((item) => (item.webkitGetAsEntry ? item.webkitGetAsEntry() : null))
+    .filter(Boolean);
+  if (!entries.length) return { files: [], hadDirectory: false };
+  const hadDirectory = entries.some((e) => e.isDirectory);
+  const results = await Promise.all(entries.map((e) => readEntry(e)));
+  return { files: results.flat(), hadDirectory };
+}
+
+function setUploadMode(mode) {
+  uploadMode = mode;
+  closeUploadMenu();
+  const hint = document.getElementById("upload-hint");
+  const hints = {
+    files: "Any supported file type, a whole folder, or a ZIP / 7z / RAR archive",
+    folder: "Folder selected — all files inside will be ingested recursively",
+    archive: "Archive selected — it will be extracted and ingested",
+  };
+  if (hint) hint.textContent = hints[mode] || hints.files;
+}
+
+function openUploadMenu() {
+  document.getElementById("upload-menu-wrap").classList.add("open");
+  document.getElementById("upload-menu-trigger").setAttribute("aria-expanded", "true");
+}
+function closeUploadMenu() {
+  document.getElementById("upload-menu-wrap").classList.remove("open");
+  document.getElementById("upload-menu-trigger").setAttribute("aria-expanded", "false");
+}
+
+function clearUploadSelection() {
+  uploadFiles = [];
+  archiveFile = null;
+  archiveAnalysis = null;
+  renderUploadUI();
+}
+
+function renderUploadUI() {
+  const preview = document.getElementById("archive-preview");
+  if (uploadMode === "archive") {
+    renderFileList([]); // hide the flat/tree list
+    if (archiveFile) renderArchiveChip(); else if (preview) preview.style.display = "none";
+  } else {
+    if (preview) preview.style.display = "none";
+    renderFileList(uploadFiles);
+  }
+}
+
+// Guards against the native file picker being triggered twice in quick
+// succession (e.g. a click event that fires more than once, or a stray
+// second call while a dialog is already open/closing). Only one `.click()`
+// is allowed to go through until the window regains focus (which happens
+// right as the OS picker closes, cancelled or not) or a short timeout passes.
+let filePickerBusy = false;
+function openPicker(inputEl) {
+  if (filePickerBusy) return;
+  filePickerBusy = true;
+  inputEl.click();
+  const release = () => {
+    filePickerBusy = false;
+    window.removeEventListener("focus", release);
+  };
+  window.addEventListener("focus", release, { once: true });
+  setTimeout(release, 1000);
+}
+
+function initUploadZone() {
+  const drop = document.getElementById("upload-drop");
+  const fileInput = document.getElementById("file-input");
+  const dirInput = document.getElementById("dir-input");
+  const archiveInput = document.getElementById("archive-input");
+  const btn = document.getElementById("upload-btn");
+  const clear = document.getElementById("upload-clear");
+  const menuWrap = document.getElementById("upload-menu-wrap");
+  const menuTrigger = document.getElementById("upload-menu-trigger");
+  const menu = document.getElementById("upload-menu");
+
+  menuTrigger.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const isOpen = menuWrap.classList.contains("open");
+    if (isOpen) closeUploadMenu(); else openUploadMenu();
+  });
+
+  menu.querySelectorAll(".upload-menu-item").forEach((item) => {
+    item.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const kind = item.dataset.kind;
+      setUploadMode(kind);
+      if (kind === "files") openPicker(fileInput);
+      else if (kind === "folder") openPicker(dirInput);
+      else if (kind === "archive") openPicker(archiveInput);
+    });
+  });
+
+  document.addEventListener("click", (e) => {
+    if (!menuWrap.contains(e.target)) closeUploadMenu();
+  });
 
   drop.addEventListener("click", (e) => {
-    if (e.target.closest(".file-chip-remove")) return;
-    input.click();
+    if (
+      e.target.closest(".file-chip-remove") ||
+      e.target.closest(".upload-menu-wrap") ||
+      e.target === fileInput ||
+      e.target === dirInput ||
+      e.target === archiveInput
+    ) return;
+    setUploadMode("files");
+    openPicker(fileInput);
   });
 
   drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("dragover"); });
   drop.addEventListener("dragleave", () => drop.classList.remove("dragover"));
-  drop.addEventListener("drop", (e) => {
+  drop.addEventListener("drop", async (e) => {
     e.preventDefault();
     drop.classList.remove("dragover");
-    addFiles(e.dataTransfer.files);
+
+    if (e.dataTransfer.items && e.dataTransfer.items.length) {
+      const { files, hadDirectory } = await expandDataTransferItems(e.dataTransfer.items);
+      if (!files.length) return;
+      if (!hadDirectory && files.length === 1 && ARCHIVE_EXTS.includes(getExt(files[0].name))) {
+        setUploadMode("archive");
+        setArchive(files[0]);
+      } else {
+        setUploadMode(hadDirectory ? "folder" : "files");
+        addUploadFiles(files);
+      }
+    } else if (e.dataTransfer.files.length) {
+      const dropped = Array.from(e.dataTransfer.files);
+      if (dropped.length === 1 && ARCHIVE_EXTS.includes(getExt(dropped[0].name))) {
+        setUploadMode("archive");
+        setArchive(dropped[0]);
+      } else {
+        setUploadMode("files");
+        addUploadFiles(dropped);
+      }
+    }
   });
 
-  input.addEventListener("change", () => { addFiles(input.files); input.value = ""; });
-  clr.addEventListener("click", () => { uploadFiles = []; renderFileList(); });
-  btn.addEventListener("click", () => onUpload());
+  fileInput.addEventListener("change", () => { addUploadFiles(fileInput.files); fileInput.value = ""; });
+  dirInput.addEventListener("change", () => { addUploadFiles(dirInput.files); dirInput.value = ""; });
+  archiveInput.addEventListener("change", () => { if (archiveInput.files.length) setArchive(archiveInput.files[0]); archiveInput.value = ""; });
 
-  return { addFiles, renderFileList };
+  clear.addEventListener("click", clearUploadSelection);
+  btn.addEventListener("click", handleUpload);
 }
 
-function addFiles(fileList) {
+function addUploadFiles(fileList) {
   for (const f of fileList) {
-    if (!uploadFiles.some((u) => u.name === f.name && u.size === f.size)) {
+    const path = f.webkitRelativePath || f.name;
+    if (!uploadFiles.some((u) => (u.webkitRelativePath || u.name) === path && u.size === f.size)) {
       uploadFiles.push(f);
     }
   }
-  renderFileList();
+  renderUploadUI();
 }
 
-function renderFileList() {
+function renderFileList(files) {
   const list = document.getElementById("upload-file-list");
   const btn = document.getElementById("upload-btn");
   const clear = document.getElementById("upload-clear");
 
   list.innerHTML = "";
-  list.className = uploadFiles.length ? "drop-zone-files has-files" : "drop-zone-files";
+  list.className = files.length ? "drop-zone-files has-files" : "drop-zone-files";
 
-  if (uploadFiles.length === 0) {
-    btn.disabled = true;
-    clear.style.display = "none";
+  if (files.length === 0) {
+    if (uploadMode !== "archive") btn.disabled = true;
+    clear.style.display = (uploadMode === "archive" && archiveFile) ? "" : "none";
     return;
   }
 
-  const totalSize = uploadFiles.reduce((sum, f) => sum + f.size, 0);
+  const hasFolderPaths = files.some((f) => f.webkitRelativePath && f.webkitRelativePath.includes("/"));
+  if (hasFolderPaths) {
+    renderFolderTree(list, files);
+  } else {
+    renderFlatFileList(list, files);
+  }
+
+  btn.disabled = false;
+  clear.style.display = "";
+}
+
+function renderFlatFileList(list, files) {
+  const totalSize = files.reduce((sum, f) => sum + f.size, 0);
   const summary = document.createElement("div");
   summary.className = "file-chip";
-  summary.innerHTML = `<span class="file-chip-name"><strong>${uploadFiles.length} file(s) selected</strong></span><span class="file-chip-meta">${formatBytes(totalSize)} total</span>`;
+  summary.innerHTML = `<span class="file-chip-name"><strong>${files.length} file(s) selected</strong></span><span class="file-chip-meta">${formatBytes(totalSize)} total</span>`;
   list.appendChild(summary);
 
-  uploadFiles.forEach((f, i) => {
+  files.forEach((f, i) => {
     const ext = getExt(f.name);
     const chip = document.createElement("div");
     chip.className = "file-chip";
@@ -510,28 +685,124 @@ function renderFileList() {
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
       uploadFiles.splice(parseInt(btn.dataset.idx), 1);
-      renderFileList();
+      renderUploadUI();
+    });
+  });
+}
+
+function renderFolderTree(list, files) {
+  // Build a tree keyed by path segments, tracking the originating index in
+  // `files` on every leaf so it can be removed individually.
+  const tree = {};
+  files.forEach((f, idx) => {
+    const path = f.webkitRelativePath || f.name;
+    const parts = path.split("/");
+    let node = tree;
+    parts.forEach((part, i) => {
+      if (!node.children) node.children = {};
+      if (!node.children[part]) node.children[part] = {};
+      node = node.children[part];
+      if (i === parts.length - 1) {
+        node.file = f;
+        node.fileIndex = idx;
+      }
     });
   });
 
-  btn.disabled = false;
-  clear.style.display = "";
+  const totalSize = files.reduce((sum, f) => sum + f.size, 0);
+  const summary = document.createElement("div");
+  summary.className = "file-chip";
+  summary.innerHTML = `<span class="file-chip-name"><strong>${files.length} file(s) selected</strong></span><span class="file-chip-meta">${formatBytes(totalSize)} total</span>`;
+  list.appendChild(summary);
+
+  let rendered = 0;
+  const MAX_VISIBLE = 40;
+
+  function renderNode(node, depth) {
+    if (!node.children || depth > 3) return;
+    Object.entries(node.children).forEach(([name, child]) => {
+      if (rendered >= MAX_VISIBLE) return;
+      const isDir = !!child.children; // explicit: it's a directory iff it has children in the tree
+      const chip = document.createElement("div");
+      chip.className = "file-chip";
+      chip.style.paddingLeft = `${depth * 16 + 8}px`;
+
+      if (isDir) {
+        const itemCount = Object.keys(child.children).length;
+        chip.innerHTML = `
+          <span class="file-chip-icon" style="color:#f59e0b">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+          </span>
+          <span class="file-chip-name">${escapeHtml(name)}</span>
+          <span class="file-chip-meta">${itemCount} item${itemCount !== 1 ? "s" : ""}</span>
+        `;
+        list.appendChild(chip);
+        rendered++;
+        renderNode(child, depth + 1);
+      } else {
+        const ext = getExt(name);
+        chip.innerHTML = `
+          <span class="file-chip-icon">${getFileIcon(name)}</span>
+          <div class="file-chip-info">
+            <span class="file-chip-name" title="${escapeHtml(name)}">${escapeHtml(name)}</span>
+            <span class="file-chip-meta">${formatBytes(child.file?.size || 0)}</span>
+          </div>
+          <button class="file-chip-remove" data-idx="${child.fileIndex}" title="Remove">&times;</button>
+        `;
+        list.appendChild(chip);
+        rendered++;
+      }
+    });
+  }
+
+  renderNode(tree, 0);
+
+  if (files.length > rendered) {
+    const more = document.createElement("div");
+    more.className = "file-chip";
+    more.style.fontStyle = "italic";
+    more.textContent = `...and ${files.length - rendered} more entries not shown`;
+    list.appendChild(more);
+  }
+
+  list.querySelectorAll(".file-chip-remove").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const idx = parseInt(btn.dataset.idx);
+      if (!isNaN(idx)) {
+        uploadFiles.splice(idx, 1);
+        renderUploadUI();
+      }
+    });
+  });
 }
 
-async function handleUploadFiles() {
+async function handleUpload() {
+  if (uploadMode === "archive") return handleArchiveUpload();
+  return handleFilesOrFolderUpload();
+}
+
+async function handleFilesOrFolderUpload() {
   const statusEl = document.getElementById("upload-status");
   if (!uploadFiles.length) return;
 
+  const isFolder = uploadFiles.some((f) => f.webkitRelativePath && f.webkitRelativePath.includes("/"));
   const fd = new FormData();
-  for (const f of uploadFiles) fd.append("files", f);
 
   try {
-    const res = await fetch(`${API}/ingest/files`, { method: "POST", body: fd });
-    const data = await res.json();
+    let res, data;
+    if (isFolder) {
+      for (const f of uploadFiles) fd.append("files", f, f.webkitRelativePath || f.name);
+      fd.append("paths", uploadFiles.map((f) => f.webkitRelativePath || f.name).join("\n"));
+      res = await fetch(`${API}/ingest/directory/upload`, { method: "POST", body: fd });
+    } else {
+      for (const f of uploadFiles) fd.append("files", f);
+      res = await fetch(`${API}/ingest/files`, { method: "POST", body: fd });
+    }
+    data = await res.json();
     if (res.ok && data.job_id) {
-      uploadFiles = [];
-      renderFileList();
-      startPolling(data.job_id, `Uploading ${data.total_files} file(s)...`);
+      clearUploadSelection();
+      startPolling(data.job_id, `${isFolder ? "Ingesting folder" : "Uploading"} — ${data.total_files} file(s)...`);
     } else {
       showMsg(statusEl, data.detail || "Upload failed", false);
       showToast("Upload failed", data.detail || "Unknown error", "error");
@@ -542,85 +813,115 @@ async function handleUploadFiles() {
   }
 }
 
-initDropZone("upload-drop", "file-input", "upload-file-list", "upload-btn", "upload-clear", handleUploadFiles);
+initUploadZone();
 
 // ── Ingest: Archive ───────────────────────────────────────────────────────
-let archiveFile = null;
-
-function initArchiveZone() {
-  const drop = document.getElementById("archive-drop");
-  const input = document.getElementById("archive-input");
-  const list = document.getElementById("archive-file-list");
-  const btn = document.getElementById("archive-btn");
-  const clear = document.getElementById("archive-clear");
-
-  drop.addEventListener("click", (e) => {
-    if (e.target.closest(".file-chip-remove")) return;
-    input.click();
+function renderArchiveChip() {
+  const list = document.getElementById("upload-file-list");
+  list.innerHTML = "";
+  if (!archiveFile) return;
+  list.className = "drop-zone-files has-files";
+  const ext = getExt(archiveFile.name);
+  const chip = document.createElement("div");
+  chip.className = "file-chip";
+  chip.innerHTML = `
+    <span class="file-chip-icon">${getFileIcon(archiveFile.name)}</span>
+    <div class="file-chip-info">
+      <span class="file-chip-name">${escapeHtml(archiveFile.name)}</span>
+      <span class="file-chip-meta">
+        <span class="file-chip-ext ${getExtBadgeClass(ext)}">${ext}</span>
+        <span>${formatBytes(archiveFile.size)}</span>
+      </span>
+    </div>
+    <button class="file-chip-remove" title="Remove">&times;</button>
+  `;
+  list.appendChild(chip);
+  chip.querySelector(".file-chip-remove").addEventListener("click", (e) => {
+    e.stopPropagation();
+    archiveFile = null;
+    archiveAnalysis = null;
+    renderArchive();
   });
-
-  drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("dragover"); });
-  drop.addEventListener("dragleave", () => drop.classList.remove("dragover"));
-  drop.addEventListener("drop", (e) => {
-    e.preventDefault();
-    drop.classList.remove("dragover");
-    if (e.dataTransfer.files.length) setArchive(e.dataTransfer.files[0]);
-  });
-
-  input.addEventListener("change", () => { if (input.files.length) setArchive(input.files[0]); input.value = ""; });
-  clear.addEventListener("click", () => { archiveFile = null; renderArchive(); });
-  btn.addEventListener("click", handleArchiveUpload);
 }
 
-function setArchive(file) { archiveFile = file; renderArchive(); }
+function setArchive(file) {
+  archiveFile = file;
+  archiveAnalysis = null;
+  renderArchive();
+  analyzeArchive(file);
+}
 
-function renderArchive() {
-  const list = document.getElementById("archive-file-list");
-  const btn = document.getElementById("archive-btn");
-  const clear = document.getElementById("archive-clear");
+async function analyzeArchive(file) {
   const preview = document.getElementById("archive-preview");
+  const myToken = ++archiveAnalyzeToken;
 
-  list.innerHTML = "";
-  if (archiveFile) {
-    list.className = "drop-zone-files has-files";
-    const ext = getExt(archiveFile.name);
-    const chip = document.createElement("div");
-    chip.className = "file-chip";
-    chip.innerHTML = `
-      <span class="file-chip-icon">${getFileIcon(archiveFile.name)}</span>
-      <div class="file-chip-info">
-        <span class="file-chip-name">${escapeHtml(archiveFile.name)}</span>
-        <span class="file-chip-meta">
-          <span class="file-chip-ext ${getExtBadgeClass(ext)}">${ext}</span>
-          <span>${formatBytes(archiveFile.size)}</span>
-        </span>
-      </div>
-      <button class="file-chip-remove" title="Remove">&times;</button>
-    `;
-    list.appendChild(chip);
-    chip.querySelector(".file-chip-remove").addEventListener("click", (e) => {
-      e.stopPropagation();
-      archiveFile = null;
-      renderArchive();
-    });
-
-    // Show archive preview hint
-    if (preview) {
-      preview.innerHTML = `<div class="progress-line current"><div class="spinner spinner-sm"></div> Analyzing archive...</div>`;
-      preview.style.display = "block";
-    }
-  } else {
-    list.className = "drop-zone-files";
-    if (preview) preview.style.display = "none";
+  if (preview) {
+    preview.innerHTML = `<div class="progress-line current"><div class="spinner spinner-sm"></div> Analyzing archive...</div>`;
+    preview.style.display = "block";
   }
 
-  btn.disabled = !archiveFile;
+  const fd = new FormData();
+  fd.append("file", file);
+
+  try {
+    const res = await fetch(`${API}/archive/analyze`, { method: "POST", body: fd });
+    const data = await res.json();
+    if (myToken !== archiveAnalyzeToken) return; // a newer file was selected meanwhile, discard this result
+
+    archiveAnalysis = data;
+    renderArchivePreview();
+  } catch (err) {
+    if (myToken !== archiveAnalyzeToken) return;
+    archiveAnalysis = { valid: false, error: err.message, file_count: 0, total_size: 0 };
+    renderArchivePreview();
+  }
+}
+
+function renderArchivePreview() {
+  const preview = document.getElementById("archive-preview");
+  const btn = document.getElementById("upload-btn");
+  if (!preview || !archiveAnalysis) return;
+  preview.style.display = "block";
+
+  if (archiveAnalysis.valid) {
+    preview.innerHTML = `
+      <div class="progress-line ok">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg>
+        Valid ${escapeHtml(archiveAnalysis.format)} archive &mdash; ${archiveAnalysis.file_count} file${archiveAnalysis.file_count !== 1 ? "s" : ""}, ${formatBytes(archiveAnalysis.total_size)} uncompressed
+      </div>
+    `;
+    if (btn) btn.disabled = false;
+  } else {
+    preview.innerHTML = `
+      <div class="progress-line err">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+        ${escapeHtml(archiveAnalysis.error || "This archive can't be ingested.")}
+      </div>
+    `;
+    if (btn) btn.disabled = true;
+  }
+}
+
+function renderArchive() {
+  renderArchiveChip();
+  const btn = document.getElementById("upload-btn");
+  const clear = document.getElementById("upload-clear");
+  const preview = document.getElementById("archive-preview");
+
+  if (!archiveFile && preview) preview.style.display = "none";
+
+  // Ingest button stays disabled until analysis confirms the archive is valid
+  btn.disabled = !archiveFile || !(archiveAnalysis && archiveAnalysis.valid);
   clear.style.display = archiveFile ? "" : "none";
 }
 
 async function handleArchiveUpload() {
-  const statusEl = document.getElementById("archive-status");
+  const statusEl = document.getElementById("upload-status");
   if (!archiveFile) return;
+  if (!archiveAnalysis || !archiveAnalysis.valid) {
+    showToast("Archive not ready", "Waiting for archive analysis to confirm it's valid.", "error");
+    return;
+  }
 
   const fd = new FormData();
   fd.append("file", archiveFile);
@@ -629,8 +930,7 @@ async function handleArchiveUpload() {
     const res = await fetch(`${API}/ingest/archive`, { method: "POST", body: fd });
     const data = await res.json();
     if (res.ok && data.job_id) {
-      archiveFile = null;
-      renderArchive();
+      clearUploadSelection();
       startPolling(data.job_id, `Extracting & ingesting archive...`);
     } else {
       showMsg(statusEl, data.detail || "Upload failed", false);
@@ -641,173 +941,6 @@ async function handleArchiveUpload() {
     showToast("Archive upload failed", err.message, "error");
   }
 }
-
-initArchiveZone();
-
-// ── Ingest: Directory ─────────────────────────────────────────────────────
-let dirFiles = [];
-
-function initDirZone() {
-  const drop = document.getElementById("dir-drop");
-  const input = document.getElementById("dir-input");
-  const list = document.getElementById("dir-file-list");
-  const btn = document.getElementById("dir-btn");
-  const clear = document.getElementById("dir-clear");
-
-  drop.addEventListener("click", (e) => {
-    if (e.target.closest(".file-chip-remove")) return;
-    input.click();
-  });
-
-  drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("dragover"); });
-  drop.addEventListener("dragleave", () => drop.classList.remove("dragover"));
-  drop.addEventListener("drop", (e) => {
-    e.preventDefault();
-    drop.classList.remove("dragover");
-    if (e.dataTransfer.files.length) addDirFiles(e.dataTransfer.files);
-  });
-
-  input.addEventListener("change", () => { addDirFiles(input.files); input.value = ""; });
-  clear.addEventListener("click", () => { dirFiles = []; renderDirFiles(); });
-  btn.addEventListener("click", handleDirUpload);
-}
-
-function addDirFiles(fileList) {
-  for (const f of fileList) {
-    if (!dirFiles.some((u) => u.name === f.name && u.size === f.size && u.webkitRelativePath === f.webkitRelativePath)) {
-      dirFiles.push(f);
-    }
-  }
-  renderDirFiles();
-}
-
-function renderDirFiles() {
-  const list = document.getElementById("dir-file-list");
-  const btn = document.getElementById("dir-btn");
-  const clear = document.getElementById("dir-clear");
-
-  list.innerHTML = "";
-
-  if (dirFiles.length === 0) {
-    list.className = "drop-zone-files";
-    btn.disabled = true;
-    clear.style.display = "none";
-    return;
-  }
-
-  // Build tree structure
-  const tree = {};
-  const flatList = [];
-  dirFiles.forEach((f) => {
-    const path = f.webkitRelativePath || f.name;
-    const parts = path.split("/");
-    let current = tree;
-    parts.forEach((part, i) => {
-      if (!current[part]) current[part] = {};
-      if (i === parts.length - 1) {
-        current[part].__file = f;
-        flatList.push(f);
-      }
-      current = current[part];
-    });
-  });
-
-  const totalSize = flatList.reduce((sum, f) => sum + f.size, 0);
-
-  // Summary chip
-  const summary = document.createElement("div");
-  summary.className = "file-chip";
-  summary.innerHTML = `<span class="file-chip-name"><strong>${flatList.length} file(s) selected</strong></span><span class="file-chip-meta">${formatBytes(totalSize)} total</span>`;
-  list.appendChild(summary);
-
-  // Render tree (show first 2 levels to avoid clutter)
-  function renderTree(node, depth = 0) {
-    const entries = Object.entries(node).filter(([k]) => !k.startsWith("__"));
-    entries.forEach(([name, children]) => {
-      if (depth >= 2) return;
-      const hasChildren = Object.keys(children).filter((k) => !k.startsWith("__")).length > 0;
-      const file = children.__file;
-      const isDir = hasChildren || (file && !file.name.includes("."));
-
-      const chip = document.createElement("div");
-      chip.className = "file-chip";
-      chip.style.paddingLeft = `${depth * 16 + 8}px`;
-
-      if (isDir) {
-        chip.innerHTML = `
-          <span class="file-chip-icon" style="color:#f59e0b">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-          </span>
-          <span class="file-chip-name">${escapeHtml(name)}</span>
-          <span class="file-chip-meta">${Object.keys(children).filter(k => !k.startsWith("__")).length} items</span>
-        `;
-      } else {
-        const ext = getExt(name);
-        chip.innerHTML = `
-          <span class="file-chip-icon">${getFileIcon(name)}</span>
-          <div class="file-chip-info">
-            <span class="file-chip-name" title="${escapeHtml(name)}">${escapeHtml(name)}</span>
-            <span class="file-chip-meta">${formatBytes(file?.size || 0)}</span>
-          </div>
-        `;
-      }
-      list.appendChild(chip);
-      renderTree(children, depth + 1);
-    });
-  }
-
-  renderTree(tree);
-
-  if (flatList.length > 10) {
-    const more = document.createElement("div");
-    more.className = "file-chip";
-    more.style.fontStyle = "italic";
-    more.textContent = `...and ${flatList.length - 10} more files`;
-    list.appendChild(more);
-  }
-
-  list.querySelectorAll(".file-chip-remove").forEach((btn) => {
-    btn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      const idx = parseInt(btn.dataset.idx);
-      if (!isNaN(idx)) {
-        dirFiles.splice(idx, 1);
-        renderDirFiles();
-      }
-    });
-  });
-
-  btn.disabled = false;
-  clear.style.display = "";
-}
-
-async function handleDirUpload() {
-  const statusEl = document.getElementById("dir-status");
-  if (!dirFiles.length) return;
-
-  const fd = new FormData();
-  for (const f of dirFiles) fd.append("files", f, f.webkitRelativePath || f.name);
-  const paths = dirFiles.map((f) => f.webkitRelativePath || f.name).join("\n");
-  fd.append("paths", paths);
-
-  try {
-    const res = await fetch(`${API}/ingest/directory/upload`, { method: "POST", body: fd });
-    const data = await res.json();
-    if (res.ok && data.job_id) {
-      dirFiles = [];
-      renderDirFiles();
-      startPolling(data.job_id, `Ingesting ${data.total_files} file(s)...`);
-    } else {
-      showMsg(statusEl, data.detail || "Error", false);
-      showToast("Directory upload failed", data.detail || "Unknown error", "error");
-    }
-  } catch (err) {
-    showMsg(statusEl, err.message, false);
-    showToast("Directory upload failed", err.message, "error");
-  }
-}
-
-initDirZone();
 
 // ── Documents ─────────────────────────────────────────────────────────────
 let docOffset = 0;
