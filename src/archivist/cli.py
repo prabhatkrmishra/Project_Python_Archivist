@@ -319,20 +319,6 @@ def clear(
     console.print("[green]Database and tracker cleared.[/green]")
 
 
-@app.command()
-def reindex(
-    confirm: bool = typer.Option(False, "--confirm", prompt="This will rebuild all vectors. Continue?"),
-):
-    """Re-vectorize all documents (use after changing vectorizer settings).
-
-    Args:
-        confirm: Confirmation flag (required).
-    """
-    if not confirm:
-        raise typer.Abort()
-    console.print("[yellow]Reindex not yet implemented -- clear and re-ingest.[/yellow]")
-
-
 def _fmt_duration(seconds: float) -> str:
     """Format duration in human-readable format.
 
