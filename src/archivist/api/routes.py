@@ -7,7 +7,6 @@ Supports single file, multi-file, archive (zip/rar/7z), and directory ingestion.
 from __future__ import annotations
 
 import hashlib
-import logging
 import os
 import shutil
 import tempfile
@@ -16,6 +15,7 @@ import time
 import uuid
 from pathlib import Path
 
+import structlog
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 
 from archivist.config import get_settings
@@ -38,7 +38,7 @@ from .schemas import (
 )
 from .security import require_api_key
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 router = APIRouter(
     prefix="/api/v1",
@@ -198,10 +198,14 @@ def _ingest_single_file(
             filename=filepath.name, status="ok", vectors=len(chunks)
         )
 
-    except Exception as e:
-        logger.error(f"Ingest failed for {filepath}: {e}")
+    except Exception as exc:
+        logger.error(
+            "ingest_failed",
+            filepath=str(filepath),
+            error=str(exc),
+        )
         return IngestedFile(
-            filename=filepath.name, status="error", vectors=0, error=str(e)
+            filename=filepath.name, status="error", vectors=0, error=str(exc)
         )
 
 
