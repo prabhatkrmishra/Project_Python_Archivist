@@ -150,6 +150,14 @@ class TestExtractArchive:
         for p in created:
             shutil.rmtree(p, ignore_errors=True)
 
+    def test_extract_zip_skips_directory_entries(self, tmp_path: Path):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("subdir/", "")  # directory entry
+            zf.writestr("subdir/a.txt", "hello")
+        files = extract_archive(buf.getvalue(), "dir.zip", dest=tmp_path)
+        assert [f.name for f in files] == ["a.txt"]
+
 
 # ── _is_safe_path ─────────────────────────────────────────────────────────────
 
@@ -244,6 +252,15 @@ class TestAnalyzeArchiveErrors:
         assert result["valid"] is False
         assert "unrar" in result["error"]
 
+    def test_rar_import_missing(self, monkeypatch: pytest.MonkeyPatch):
+        import sys
+
+        monkeypatch.setitem(sys.modules, "rarfile", None)
+        data = b"Rar!\x1a\x07\x00" + b"fake payload"
+        result = analyze_archive(data, "x.rar")
+        assert result["valid"] is False
+        assert "rarfile" in result["error"]
+
 
 # ── extract_archive: deep error paths ─────────────────────────────────────────
 
@@ -284,6 +301,25 @@ class TestExtractArchiveErrors:
         data = _make_7z({"a.md": "# A", "b.md": "# B"})
         with pytest.raises(ArchiveError, match="max is"):
             extract_archive(data, "many.7z", dest=tmp_path)
+
+    def test_7z_path_traversal_rejected(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        # py7zr refuses to *write* a "../" member, so fake an archive whose
+        # member list contains one - the traversal guard must reject it.
+        import py7zr
+
+        class EvilArchive:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def getnames(self):
+                return ["../evil.txt"]
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(py7zr, "SevenZipFile", EvilArchive)
+        with pytest.raises(ArchiveError, match="Path traversal"):
+            extract_archive(b"7z\xbc\xaf\x27\x1c\x00\x04", "evil.7z", dest=tmp_path)
 
     def test_rar_without_unrar_binary(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         import rarfile
