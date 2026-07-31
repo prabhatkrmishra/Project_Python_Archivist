@@ -170,3 +170,150 @@ class TestIsSafePath:
     def test_normalized_traversal_inside(self, tmp_path: Path):
         # "sub/../file.txt" normalizes to a path still inside dest - allowed.
         assert _is_safe_path(tmp_path, "sub/../file.txt") is True
+
+
+# ── Signature validation ──────────────────────────────────────────────────────
+
+
+class TestValidateSignature:
+    def test_unknown_suffix_is_noop(self):
+        # Extensions outside the archive set have no magic-byte table, so the
+        # check must pass through without rejecting anything.
+        from archivist.api.archives import _validate_signature
+
+        _validate_signature(b"anything at all", ".txt")  # must not raise
+
+
+# ── analyze_archive: deep error paths ─────────────────────────────────────────
+
+
+class TestAnalyzeArchiveErrors:
+    def test_zip_with_valid_magic_but_garbage_body(self):
+        # Signature check passes (PK\x03\x04) but the central directory is
+        # garbage, so ZipFile itself must fail to open.
+        data = b"PK\x03\x04" + b"this is not a real zip payload"
+        result = analyze_archive(data, "broken.zip")
+        assert result["valid"] is False
+        assert "Invalid ZIP" in result["error"]
+
+    def test_zip_whose_testzip_raises(self, monkeypatch: pytest.MonkeyPatch):
+        # A corrupt DEFLATE stream can make testzip() raise zlib.error rather
+        # than returning the offending member; that must map to invalid too.
+        import zlib
+
+        import zipfile as zf_mod
+
+        def _boom(self):
+            raise zlib.error("decompress data error")
+
+        monkeypatch.setattr(zf_mod.ZipFile, "testzip", _boom)
+        result = analyze_archive(_make_stored_zip({"a.txt": "x"}), "boom.zip")
+        assert result["valid"] is False
+        assert "Invalid or corrupt ZIP" in result["error"]
+
+    def test_7z_import_missing(self, monkeypatch: pytest.MonkeyPatch):
+        import sys
+
+        monkeypatch.setitem(sys.modules, "py7zr", None)
+        # Raw valid signature only - can't use _make_7z() because that helper
+        # itself imports py7zr and would fail under the patch.
+        result = analyze_archive(b"7z\xbc\xaf\x27\x1c\x00\x04", "x.7z")
+        assert result["valid"] is False
+        assert "py7zr" in result["error"]
+
+    def test_7z_with_valid_magic_but_garbage_body(self):
+        data = b"7z\xbc\xaf\x27\x1c" + b"garbage payload"
+        result = analyze_archive(data, "broken.7z")
+        assert result["valid"] is False
+        assert result["error"]  # rejected before any extraction
+
+    def test_7z_corrupt_member_reported(self, monkeypatch: pytest.MonkeyPatch):
+        import py7zr
+
+        monkeypatch.setattr(py7zr.SevenZipFile, "testzip", lambda self: ["a.md"])
+        result = analyze_archive(_make_7z({"a.md": "# Hi"}), "corrupt.7z")
+        assert result["valid"] is False
+        assert "Corrupt" in result["error"]
+
+    def test_rar_without_unrar_binary(self, monkeypatch: pytest.MonkeyPatch):
+        import rarfile
+
+        monkeypatch.setattr(rarfile, "UNRAR_TOOL", None)
+        data = b"Rar!\x1a\x07\x00" + b"fake payload"
+        result = analyze_archive(data, "x.rar")
+        assert result["valid"] is False
+        assert "unrar" in result["error"]
+
+
+# ── extract_archive: deep error paths ─────────────────────────────────────────
+
+
+class TestExtractArchiveErrors:
+    def test_zip_with_valid_magic_but_garbage_body(self, tmp_path: Path):
+        with pytest.raises(ArchiveError, match="Invalid ZIP"):
+            extract_archive(
+                b"PK\x03\x04" + b"not a real zip payload", "broken.zip", dest=tmp_path
+            )
+
+    def test_zip_over_file_limit(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        import archivist.api.archives as archives
+
+        monkeypatch.setattr(archives, "_MAX_ARCHIVE_FILES", 1)
+        data = _make_zip({"a.txt": "1", "b.txt": "2"})
+        with pytest.raises(ArchiveError, match="max is"):
+            extract_archive(data, "many.zip", dest=tmp_path)
+
+    def test_zip_path_traversal_rejected(self, tmp_path: Path):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("../evil.txt", "pwned")
+        with pytest.raises(ArchiveError, match="Path traversal"):
+            extract_archive(buf.getvalue(), "evil.zip", dest=tmp_path)
+
+    def test_7z_import_missing(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        import sys
+
+        monkeypatch.setitem(sys.modules, "py7zr", None)
+        with pytest.raises(ArchiveError, match="py7zr"):
+            extract_archive(b"7z\xbc\xaf\x27\x1c\x00\x04", "x.7z", dest=tmp_path)
+
+    def test_7z_over_file_limit(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        import archivist.api.archives as archives
+
+        monkeypatch.setattr(archives, "_MAX_ARCHIVE_FILES", 1)
+        data = _make_7z({"a.md": "# A", "b.md": "# B"})
+        with pytest.raises(ArchiveError, match="max is"):
+            extract_archive(data, "many.7z", dest=tmp_path)
+
+    def test_rar_without_unrar_binary(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        import rarfile
+
+        monkeypatch.setattr(rarfile, "UNRAR_TOOL", None)
+        data = b"Rar!\x1a\x07\x00" + b"fake payload"
+        with pytest.raises(ArchiveError, match="unrar"):
+            extract_archive(data, "x.rar", dest=tmp_path)
+
+    def test_rar_import_missing(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        import sys
+
+        monkeypatch.setitem(sys.modules, "rarfile", None)
+        data = b"Rar!\x1a\x07\x00" + b"fake payload"
+        with pytest.raises(ArchiveError, match="rarfile"):
+            extract_archive(data, "x.rar", dest=tmp_path)
+
+
+# ── _is_safe_path: exception handling ─────────────────────────────────────────
+
+
+class TestIsSafePathErrors:
+    def test_unresolvable_name_returns_false(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        import pathlib
+
+        # A name that cannot be resolved (e.g. an embedded null byte on some
+        # platforms) must be treated as unsafe rather than crashing. Force the
+        # resolution failure so the test is platform-independent.
+        def _boom(self, strict=False):
+            raise ValueError("embedded null byte")
+
+        monkeypatch.setattr(pathlib.Path, "resolve", _boom)
+        assert _is_safe_path(tmp_path, "file.txt") is False
