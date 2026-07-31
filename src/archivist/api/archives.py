@@ -218,7 +218,11 @@ def _analyze_7z(file_bytes: bytes) -> tuple[int, int]:
     try:
         try:
             archive = py7zr.SevenZipFile(tmp_path, mode="r")
-        except py7zr.Bad7zFile as e:
+        except Exception as e:
+            # py7zr raises Bad7zFile for well-formed-but-invalid headers, but
+            # truncated garbage can surface as struct.error instead - both mean
+            # "this is not a readable 7z archive" and both must map to a clean
+            # ArchiveError rather than escaping as an internal traceback.
             raise ArchiveError(f"Invalid 7z file: {e}") from e
 
         if archive.testzip() is not None:
@@ -342,12 +346,16 @@ def _extract_7z(data: bytes, dest: Path) -> list[Path]:
         members = archive.getnames()
 
         if len(members) > _MAX_ARCHIVE_FILES:
+            # Close before raising: on Windows the open file handle would
+            # otherwise make the finally-block unlink fail with WinError 32.
+            archive.close()
             raise ArchiveError(
                 f"Archive contains {len(members)} files, max is {_MAX_ARCHIVE_FILES}"
             )
 
         for member in members:
             if not _is_safe_path(dest, member):
+                archive.close()
                 raise ArchiveError(f"Path traversal detected in archive: {member}")
 
         archive.extractall(path=str(dest))
@@ -402,12 +410,16 @@ def _extract_rar(data: bytes, dest: Path) -> list[Path]:
         members = [m for m in rf.namelist() if not m.endswith("/")]
 
         if len(members) > _MAX_ARCHIVE_FILES:
+            # Close before raising: an open rarfile handle would make the
+            # finally-block temp unlink fail on Windows.
+            rf.close()
             raise ArchiveError(
                 f"Archive contains {len(members)} files, max is {_MAX_ARCHIVE_FILES}"
             )
 
         for member in members:
             if not _is_safe_path(dest, member):
+                rf.close()
                 raise ArchiveError(f"Path traversal detected in archive: {member}")
 
         rf.extractall(dest)
