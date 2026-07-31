@@ -466,3 +466,147 @@ class TestArchiveUtilities:
         files = extract_archive(zip_data, "test.7z", dest=tmp_path)
         assert len(files) == 1
         assert files[0].name == "doc.md"
+
+# ── Jobs ──────────────────────────────────────────────────────────────────────
+
+
+class TestJobs:
+    async def test_job_not_found(self, client: AsyncClient):
+        r = await client.get("/api/v1/jobs/does-not-exist")
+        assert r.status_code == 404
+
+
+# ── Ingest: error paths ───────────────────────────────────────────────────────
+
+
+class TestIngestErrors:
+    async def test_ingest_too_large(self, client: AsyncClient):
+        import archivist.api.routes as routes
+
+        routes.settings.api_max_upload_mb = 0  # any non-empty upload exceeds
+        r = await client.post(
+            "/api/v1/ingest/file",
+            files={"file": ("big.txt", io.BytesIO(b"x"), "text/plain")},
+        )
+        assert r.status_code == 413
+
+    async def test_ingest_corrupt_pdf_reports_error(self, client: AsyncClient):
+        r = await client.post(
+            "/api/v1/ingest/file",
+            files={"file": ("broken.pdf", io.BytesIO(b"%PDF-1.4 not real"), "application/pdf")},
+        )
+        assert r.status_code == 200
+        assert r.json()["files"][0]["status"] == "error"
+
+
+# ── Ingest: directory upload ──────────────────────────────────────────────────
+
+
+class TestIngestDirectoryUpload:
+    async def test_mismatched_paths_rejected(self, client: AsyncClient):
+        r = await client.post(
+            "/api/v1/ingest/directory/upload",
+            files=[("files", ("a.txt", io.BytesIO(b"hi"), "text/plain"))],
+            data={"paths": "a.txt\nb.txt"},
+        )
+        assert r.status_code == 400
+
+    async def test_folder_upload_preserves_paths(self, client: AsyncClient):
+        r = await client.post(
+            "/api/v1/ingest/directory/upload",
+            files=[
+                ("files", ("myfolder/sub/a.txt", io.BytesIO(b"folder file alpha"), "text/plain")),
+            ],
+            data={"paths": "myfolder/sub/a.txt"},
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["total_files"] == 1
+        await _poll_job(client, data["job_id"])
+        stored = (await client.get("/api/v1/documents")).json()["documents"][0]["filepath"]
+        assert stored.replace("\\", "/") == "myfolder/sub/a.txt"
+
+
+# ── Ingest: archive analyze + errors ──────────────────────────────────────────
+
+
+class TestIngestArchiveEdges:
+    async def test_analyze_archive_endpoint_valid(self, client: AsyncClient):
+        data = _make_zip({"a.txt": "hello"})
+        r = await client.post(
+            "/api/v1/archive/analyze",
+            files={"file": ("x.zip", io.BytesIO(data), "application/zip")},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["valid"] is True
+        assert body["file_count"] == 1
+
+    async def test_analyze_archive_endpoint_invalid(self, client: AsyncClient):
+        r = await client.post(
+            "/api/v1/archive/analyze",
+            files={"file": ("fake.zip", io.BytesIO(b"not a zip"), "application/zip")},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["valid"] is False
+        assert body["error"]
+
+    async def test_ingest_archive_too_large(self, client: AsyncClient):
+        import archivist.api.routes as routes
+
+        routes.settings.api_max_upload_mb = 0
+        r = await client.post(
+            "/api/v1/ingest/archive",
+            files={"file": ("x.zip", io.BytesIO(b"x"), "application/zip")},
+        )
+        assert r.status_code == 413
+
+    async def test_ingest_empty_archive_returns_no_job(self, client: AsyncClient):
+        r = await client.post(
+            "/api/v1/ingest/archive",
+            files={"file": ("empty.zip", io.BytesIO(_make_zip({})), "application/zip")},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["job_id"] is None
+        assert body["total_files"] == 0
+
+
+# ── Documents: retrieval and deletion ─────────────────────────────────────────
+
+
+class TestDocumentEdges:
+    async def _ingest_one(self, client: AsyncClient, name: str, content: str):
+        await client.post(
+            "/api/v1/ingest/file",
+            files={"file": (name, io.BytesIO(content.encode()), "text/plain")},
+        )
+
+    async def test_get_document_by_id(self, client: AsyncClient):
+        await self._ingest_one(client, "doc.txt", "content for get")
+        docs = (await client.get("/api/v1/documents")).json()["documents"]
+        r = await client.get(f"/api/v1/documents/{docs[0]['doc_id']}")
+        assert r.status_code == 200
+        assert r.json()["doc_id"] == docs[0]["doc_id"]
+
+    async def test_list_extensions(self, client: AsyncClient):
+        await self._ingest_one(client, "a.py", "py content")
+        await self._ingest_one(client, "b.txt", "txt content")
+        exts = (await client.get("/api/v1/documents/extensions")).json()
+        assert ".py" in exts
+        assert ".txt" in exts
+
+    async def test_delete_documents_by_hash(self, client: AsyncClient):
+        await self._ingest_one(client, "doc.txt", "hash delete me")
+        docs = (await client.get("/api/v1/documents")).json()["documents"]
+        r = await client.delete("/api/v1/documents", params={"file_hash": docs[0]["file_hash"]})
+        assert r.status_code == 200
+        assert (await client.get("/api/v1/documents")).json()["total"] == 0
+
+    async def test_delete_all_documents(self, client: AsyncClient):
+        await self._ingest_one(client, "doc.txt", "clear me")
+        r = await client.delete("/api/v1/documents/all")
+        assert r.status_code == 200
+        assert (await client.get("/api/v1/documents")).json()["total"] == 0
+
