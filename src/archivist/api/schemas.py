@@ -45,7 +45,7 @@ class IngestedFile(BaseModel):
 
     filename: str
     status: str = Field(description="ok, skipped, or error")
-    vectors: int = Field(description="Number of chunks created")
+    chunks: int = Field(description="Number of chunks created")
     error: str | None = Field(default=None, description="Error message if status=error")
 
 
@@ -54,7 +54,7 @@ class IngestResponse(BaseModel):
 
     status: str
     total_files: int
-    total_vectors: int
+    total_chunks: int
     elapsed_seconds: float
     files: list[IngestedFile]
 

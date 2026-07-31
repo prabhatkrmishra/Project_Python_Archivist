@@ -1,6 +1,6 @@
 """Document ingestion pipeline.
 
-Orchestrates the extraction, vectorization, and storage of documents.
+Orchestrates the extraction, chunking, and storage of documents.
 Uses SQLite FTS5 as the default and only search backend.
 Supports multi-chunk ingestion for large files.
 """

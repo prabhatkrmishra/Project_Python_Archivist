@@ -89,17 +89,17 @@ def _run_ingest_job(
         try:
             result = _ingest_single_file(filepath, tracker, root_dir=root_dir)
         except Exception as exc:
-            result = IngestedFile(filename=filepath.name, status="error", vectors=0, error=str(exc))
+            result = IngestedFile(filename=filepath.name, status="error", chunks=0, error=str(exc))
         results.append(result)
 
     elapsed = time.time() - start
     tracker.close()
 
-    total_vectors = sum(r.vectors for r in results)
+    total_chunks = sum(r.chunks for r in results)
     response = IngestResponse(
         status="ok",
         total_files=len(results),
-        total_vectors=total_vectors,
+        total_chunks=total_chunks,
         elapsed_seconds=round(elapsed, 3),
         files=results,
     )
@@ -140,7 +140,7 @@ def _ingest_single_file(
     try:
         if tracker.is_indexed(filepath):
             return IngestedFile(
-                filename=filepath.name, status="skipped", vectors=0
+                filename=filepath.name, status="skipped", chunks=0
             )
 
         raw = filepath.read_bytes()
@@ -159,7 +159,7 @@ def _ingest_single_file(
         if not display_text.strip():
             tracker.record(filepath, file_hash)
             return IngestedFile(
-                filename=filepath.name, status="skipped", vectors=0
+                filename=filepath.name, status="skipped", chunks=0
             )
 
         sq = SQLiteSearch(settings.sqlite_db)
@@ -194,7 +194,7 @@ def _ingest_single_file(
         sq.close()
         tracker.record(filepath, file_hash)
         return IngestedFile(
-            filename=filepath.name, status="ok", vectors=len(chunks)
+            filename=filepath.name, status="ok", chunks=len(chunks)
         )
 
     except Exception as exc:
@@ -204,7 +204,7 @@ def _ingest_single_file(
             error=str(exc),
         )
         return IngestedFile(
-            filename=filepath.name, status="error", vectors=0, error=str(exc)
+            filename=filepath.name, status="error", chunks=0, error=str(exc)
         )
 
 
@@ -346,7 +346,7 @@ async def ingest_file(file: UploadFile = File(...)):
         return IngestResponse(
             status="ok",
             total_files=1,
-            total_vectors=result.vectors,
+            total_chunks=result.chunks,
             elapsed_seconds=round(elapsed, 3),
             files=[result],
         )
@@ -500,11 +500,11 @@ async def ingest_directory(body: dict):
     elapsed = time.time() - start
     tracker.close()
 
-    total_vectors = sum(r.vectors for r in results)
+    total_chunks = sum(r.chunks for r in results)
     return IngestResponse(
         status="ok",
         total_files=len(results),
-        total_vectors=total_vectors,
+        total_chunks=total_chunks,
         elapsed_seconds=round(elapsed, 3),
         files=results,
     )

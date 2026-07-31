@@ -199,7 +199,7 @@ class TestIngestFile:
         assert data["status"] == "ok"
         assert data["total_files"] == 1
         assert data["files"][0]["status"] == "ok"
-        assert data["files"][0]["vectors"] >= 1
+        assert data["files"][0]["chunks"] >= 1
 
     async def test_ingest_file_response_schema(self, client: AsyncClient):
         content = _make_text_file("doc.py", "def hello():\n    pass\n")
@@ -208,7 +208,7 @@ class TestIngestFile:
             files={"file": ("doc.py", io.BytesIO(content), "text/plain")},
         )
         data = r.json()
-        for key in ["status", "total_files", "total_vectors", "elapsed_seconds", "files"]:
+        for key in ["status", "total_files", "total_chunks", "elapsed_seconds", "files"]:
             assert key in data
 
     async def test_ingest_empty_file(self, client: AsyncClient):
@@ -254,7 +254,7 @@ class TestIngestFiles:
 
         job_id = data["job_id"]
         result = await _poll_job(client, job_id)
-        assert result["result"]["total_vectors"] >= 2
+        assert result["result"]["total_chunks"] >= 2
 
     async def test_ingest_no_files(self, client: AsyncClient):
         r = await client.post("/api/v1/ingest/files")
@@ -281,7 +281,7 @@ class TestIngestArchive:
 
         job_id = data["job_id"]
         result = await _poll_job(client, job_id)
-        assert result["result"]["total_vectors"] >= 2
+        assert result["result"]["total_chunks"] >= 2
 
     async def test_ingest_7z_archive(self, client: AsyncClient, tmp_path: Path):
         zip_data = _make_7z({
@@ -327,7 +327,7 @@ class TestIngestDirectory:
         assert r.status_code == 200
         data = r.json()
         assert data["total_files"] == 2
-        assert data["total_vectors"] >= 2
+        assert data["total_chunks"] >= 2
 
     async def test_ingest_directory_not_found(self, client: AsyncClient, tmp_path: Path):
         r = await client.post(

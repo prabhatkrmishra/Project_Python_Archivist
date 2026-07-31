@@ -20,8 +20,6 @@ class Settings(BaseSettings):
     ARCHIVIST_ (e.g., ARCHIVIST_DATA_DIR).
 
     Attributes:
-        ingest_batch_size: Batch size for ingestion operations.
-        ingest_workers: Number of parallel ingestion workers.
         ingest_recursive: Recursively scan directories.
         ingest_chunk_large: Chunk large files by page/section.
         ingest_chunk_threshold_bytes: Byte threshold for chunking (default 10MB).
@@ -42,8 +40,6 @@ class Settings(BaseSettings):
     )
 
     # Ingestion Configuration
-    ingest_batch_size: int = 100
-    ingest_workers: int = 4
     ingest_recursive: bool = True
     ingest_chunk_large: bool = True
     ingest_chunk_threshold_bytes: int = 10 * 1024 * 1024  # 10 MB

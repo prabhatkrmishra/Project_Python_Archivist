@@ -209,7 +209,7 @@ function updateProgress(data) {
         ${skip ? `<div class="progress-line">⊘ ${skip} Skipped</div>` : ""}
         ${err ? `<div class="progress-line err">✗ ${err} File errors</div>` : ""}
         ${err && errorItems.length ? `<div class="progress-detail">${errorItems.map(e => `&nbsp;&nbsp;-> ${e}`).join("<br>")}</div>` : ""}
-        <div class="progress-summary">Done in ${elapsed}s — ${data.result?.total_vectors || 0} vectors created</div>
+        <div class="progress-summary">Done in ${elapsed}s — ${data.result?.total_chunks || 0} chunks created</div>
       `;
     document.getElementById("progress-text").textContent = "Complete!";
     document.getElementById("progress-fill").style.width = "100%";

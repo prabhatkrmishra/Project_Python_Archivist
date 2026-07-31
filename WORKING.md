@@ -55,7 +55,7 @@ Typer CLI entry point
 │               └── INSERT OR REPLACE INTO files (file_hash, filepath, ...)
 │
 │       │ # SUMMARY
-│       ├── Rich print: "Ingestion complete: X files -> Y vectors in Zs"
+│       ├── Rich print: "Ingestion complete: X files -> Y chunks in Zs"
 │       └── tracker.close()
 ```
 
@@ -178,7 +178,6 @@ Typer CLI entry point
 | `ingestion/tracker.py` | SQLite SHA256 hash tracker for idempotency |
 | `ingestion/pipeline.py` | Ingestion orchestration |
 | `search/sqlite_search.py` | SQLite FTS5 backend (external-content with auto-sync triggers) |
-| `vectorizer/hashing_tfidf.py` | HashingVectorizer vectorization |
 | `utils/text.py` | Line-numbered snippet extraction |
 | `api/routes.py` | FastAPI REST endpoints |
 | `main.py` | FastAPI application factory |

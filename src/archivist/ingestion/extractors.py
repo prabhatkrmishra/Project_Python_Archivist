@@ -5,7 +5,7 @@ Supports:
 - PDF documents (.pdf) via pypdf
 - Word documents (.docx) via python-docx
 
-All extracted text is normalized for consistent vectorization.
+All extracted text is normalized for consistent indexing.
 """
 
 from __future__ import annotations
@@ -78,7 +78,7 @@ def sha256_file(path: Path) -> str:
 
 
 def normalize_text(text: str) -> str:
-    """Normalize text for vectorization.
+    """Normalize text for indexing.
 
     Processes text by:
     1. Converting to lowercase

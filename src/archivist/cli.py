@@ -47,11 +47,10 @@ def _get_backend():
 def ingest(
     path: str,
     recursive: bool = typer.Option(True, "--recursive/--no-recursive"),
-    workers: int = typer.Option(settings.ingest_workers, "--workers", "-w"),
     chunk: bool = typer.Option(True, "--chunk/--no-chunk"),
     json_output: bool = typer.Option(False, "--json", "-j"),
 ):
-    """Ingest a file or directory into the vector store."""
+    """Ingest a file or directory into the search index."""
     root = Path(path).resolve()
     if not root.exists():
         if json_output:
@@ -82,7 +81,7 @@ def ingest(
         console.print(f"Ingesting {total_new} files ({skipped} already indexed)...")
 
     ingested = 0
-    total_vectors = 0
+    total_chunks = 0
     errors = 0
     files_detail = []
     start = time.time()
@@ -90,22 +89,22 @@ def ingest(
     for i, filepath in enumerate(new_files, 1):
         try:
             n = _ingest_sqlite(filepath, tracker)
-            total_vectors += n
+            total_chunks += n
             ingested += 1
             files_detail.append({
                 "file": str(filepath),
                 "name": filepath.name,
-                "vectors": n,
+                "chunks": n,
                 "status": "ok",
             })
             if not json_output:
-                console.print(f" [{i}/{total_new}] {filepath.name} -> {n} vectors")
+                console.print(f" [{i}/{total_new}] {filepath.name} -> {n} chunks")
         except Exception as e:
             errors += 1
             files_detail.append({
                 "file": str(filepath),
                 "name": filepath.name,
-                "vectors": 0,
+                "chunks": 0,
                 "status": "error",
                 "error": str(e),
             })
@@ -120,7 +119,7 @@ def ingest(
             "total_new": total_new,
             "skipped": skipped,
             "ingested": ingested,
-            "total_vectors": total_vectors,
+            "total_chunks": total_chunks,
             "errors": errors,
             "elapsed_seconds": round(elapsed, 2),
             "files": files_detail,
@@ -129,7 +128,7 @@ def ingest(
     else:
         elapsed_fmt = _fmt_duration(elapsed)
         console.print(
-            f"\n[green]Ingestion complete: {ingested} files -> {total_vectors} vectors in {elapsed_fmt}[/green]\n"
+            f"\n[green]Ingestion complete: {ingested} files -> {total_chunks} chunks in {elapsed_fmt}[/green]\n"
             f"  ({skipped} already indexed, {errors} errors)"
         )
 
@@ -303,7 +302,7 @@ def delete(
 def clear(
     confirm: bool = typer.Option(False, "--confirm", prompt="This will delete ALL indexed data. Continue?"),
 ):
-    """Delete all vectors and reset the tracker. Use with caution."""
+    """Delete all indexed chunks and reset the tracker. Use with caution."""
     if not confirm:
         raise typer.Abort()
     b = _get_backend()
