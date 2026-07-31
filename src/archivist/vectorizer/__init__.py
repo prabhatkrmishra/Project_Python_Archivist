@@ -1,1 +1,0 @@
-"""Vectorizer module for Archivist."""
