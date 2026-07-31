@@ -8,8 +8,9 @@ Fully offline, CLI-first document search tool. Ingests 30+ file types — code, 
 - **30+ file types** — code (.py, .js, .ts, .java, .c, .cpp, .go, .rs, etc.), docs (.pdf, .docx, .md, .txt), config (.json, .yaml, .toml, .xml), tabular (.csv, .tsv, .xls, .xlsx, .jsonl)
 - **Incremental ingestion** — SHA256 hash tracker skips already-indexed files
 - **Line-numbered output** — search results show `> L42: matching line` with context
-- **Large-file chunking** — PDFs split by page, DOCX by section, when >10MB / >100 pages
-- **API key auth** — `X-API-Key` header for deployed endpoints
+- **Large-file chunking** — PDFs split by page, DOCX by section, code by line count, with accurate per-chunk line offsets
+- **Optional API key auth** — `X-API-Key` header when `ARCHIVIST_API_KEY` is set
+- **Structured logs** — request IDs on every log line via structlog
 - **CLI + REST API** — use from terminal or integrate via HTTP
 
 ## Quick Start
@@ -76,7 +77,6 @@ archivist status
 | `archivist status` | Show index stats |
 | `archivist delete <doc_id>` | Delete a document by ID |
 | `archivist clear --confirm` | Delete all indexed data |
-| `archivist reindex --confirm` | Rebuild all vectors |
 
 ### Ingest Options
 
@@ -84,9 +84,8 @@ archivist status
 archivist ingest /path/to/docs \
   --recursive        # walk subdirectories (default: true) \
   --no-recursive     # only top-level files \
-  --workers 8        # parallel workers (default: CPU count) \
   --chunk            # chunk large files (default: true) \
-  --no-chunk         # index whole file as single vector
+  --no-chunk         # index whole file as a single chunk
 ```
 
 ### Search Options
@@ -121,7 +120,7 @@ Source: report.txt  |  Match: score=0.8234
 
 ## API Usage
 
-All endpoints are under `/api/v1`. Set `ARCHIVIST_API_KEY` env var to enable `X-API-Key` auth.
+All endpoints are under `/api/v1`. Set `ARCHIVIST_API_KEY` to require an `X-API-Key` header; without it the API is open (the local-tool default).
 
 ### Endpoints
 
@@ -141,13 +140,13 @@ curl "http://localhost:8000/api/v1/search?q=quarterly+budget&size=5"
 # Status
 curl http://localhost:8000/api/v1/status
 
-# Upload a file
-curl -X POST -F "file=@report.pdf" http://localhost:8000/api/v1/ingest/file
+# Upload a file (with auth enabled)
+curl -X POST -H "X-API-Key: your-key" -F "file=@report.pdf" http://localhost:8000/api/v1/ingest/file
 
 # Delete
 curl -X DELETE http://localhost:8000/api/v1/documents/abc-123-def
 
-# Health check
+# Health check (always open)
 curl http://localhost:8000/health
 ```
 
@@ -160,11 +159,11 @@ curl http://localhost:8000/health
    - **CSV/TSV** — auto-detect delimiter, flatten rows as "header: value | header: value"
    - **Excel** (.xls/.xlsx) — extract each sheet, flatten rows with column names
    - **JSONL** — parse each line as JSON, flatten nested objects with dot notation
-   - Text is normalized (lowercased for vectorization, original case preserved for display).
+   - Text is normalized for indexing while original case/line structure is preserved for display.
 
-2. **Indexing** — SQLite FTS5 (external-content with triggers) creates an inverted index for fast keyword search with BM25 ranking. Content stored once in `documents` table; FTS5 fetches on demand (~46% storage savings).
+2. **Indexing** — SQLite FTS5 (external-content with triggers) creates an inverted index for fast keyword search with BM25 ranking. Content is stored once in the `documents` table; FTS5 fetches on demand (~46% storage savings). Large files are chunked by page/section/rows/lines, and each chunk records the true starting line number so snippets point at the right place.
 
-3. **Search** — Your query is matched against the index. Results are ranked by relevance (BM25) and displayed with line-numbered context.
+3. **Search** — Your query is matched against the index with prefix matching and BM25 ranking, then displayed with line-numbered context.
 
 4. **Idempotency** — A SQLite tracker stores SHA256 hashes of ingested files. Re-running `archivist ingest` skips already-indexed files.
 
@@ -178,13 +177,12 @@ Override with env vars or `.env` file:
 # Storage
 ARCHIVIST_DATA_DIR=~/.local/share/archivist
 
-# Vectorizer
-ARCHIVIST_VECTORIZER_N_FEATURES=1048576   # 2^20 dimensions
-
 # API
 ARCHIVIST_API_HOST=0.0.0.0
 ARCHIVIST_API_PORT=8000
-ARCHIVIST_API_KEY=your-api-key
+ARCHIVIST_API_KEY=your-api-key        # set to require X-API-Key auth
+ARCHIVIST_CORS_ORIGINS=*              # comma-separated allowlist for deploy
+ARCHIVIST_LOG_LEVEL=INFO              # DEBUG | INFO | WARNING | ERROR
 ```
 
 ## Architecture
@@ -195,29 +193,34 @@ archivist/
 │   ├── __init__.py          # Package metadata
 │   ├── cli.py               # Typer CLI (ingest, search, status, delete, clear)
 │   ├── config.py            # Pydantic settings with env override
-│   ├── main.py              # FastAPI application factory
+│   ├── main.py              # FastAPI application factory (CORS, logging, request IDs)
 │   ├── api/
-│   │   ├── routes.py        # REST API endpoints
-│   │   └── schemas.py       # API schemas (placeholder)
+│   │   ├── routes.py        # REST API endpoints + async ingestion jobs
+│   │   ├── schemas.py       # Pydantic request/response models
+│   │   ├── security.py      # X-API-Key auth dependency
+│   │   └── archives.py      # zip/7z/rar extraction (magic-byte + zip-slip checks)
 │   ├── ingestion/
-│   │   ├── extractors.py    # PDF/DOCX/TXT extraction + normalization
+│   │   ├── extractors.py    # PDF/DOCX/TXT/CSV/Excel/JSONL extraction + normalization + chunking
 │   │   ├── pipeline.py      # Ingestion orchestration
 │   │   └── tracker.py       # SQLite idempotency tracker
-   │   ├── search/
-   │   │   └── sqlite_search.py # SQLite FTS5 backend (external-content + triggers)
-│   ├── utils/
-│   │   └── text.py          # Snippet extraction with line numbers
-│   └── vectorizer/
-│       └── hashing_tfidf.py # HashingVectorizer vectorization
+│   ├── search/
+│   │   └── sqlite_search.py # SQLite FTS5 backend (external-content + triggers)
+│   └── utils/
+│       └── text.py          # Snippet extraction with line numbers
 ├── tests/                   # Tests
 ├── docs/
 │   └── bare-metal.md        # Production deployment guide
 ├── pyproject.toml           # Dependencies and build config
 ├── requirements.txt         # Runtime dependencies
 ├── requirements-dev.txt     # Dev/test dependencies
-├── WORKING.md               # Detailed function flow documentation
-└── README.md                # This file
+└── WORKING.md               # Detailed function flow documentation
 ```
+
+## Why these decisions
+
+- **SQLite FTS5 instead of a vector database** — this tool is fully offline by design. FTS5 gives sub-millisecond keyword search with BM25 ranking, and keyword search is the right tool for code identifiers, config keys, and exact terms. External vector services were tried and deliberately dropped to keep the zero-dependency promise.
+- **External-content FTS5** — content is stored once in the `documents` table and fetched by FTS5 on demand, saving ~46% storage versus naive tables.
+- **Chunking with real line offsets** — chunks vary by type (PDF page, DOCX section, CSV rows, code lines), so offsets are computed cumulatively rather than assumed fixed-size.
 
 ## Tests
 
@@ -228,12 +231,13 @@ pytest tests/ -v
 ```
 
 **Tests covering:**
-- Text extraction (TXT, PDF, DOCX)
+- Text extraction (TXT, PDF, DOCX, CSV, Excel, JSONL)
 - Normalization and chunking
-- Vectorization (HashingVectorizer)
 - SQLite FTS5 search, delete, stats
 - SQLite tracker idempotency
-- Directory walk + mempalace output logic
+- Directory walk + CLI output logic
+- API endpoints, including API-key auth
+- Archive extraction, corruption checks, and zip-slip protection
 - End-to-end ingest → search → verify
 
 ## FAQ
@@ -241,11 +245,11 @@ pytest tests/ -v
 **Why SQLite FTS5?**
 Zero external services. No Docker, no server, no JVM. Just Python's built-in SQLite. Fast enough for most use cases (sub-millisecond search on 100K documents). Uses external-content FTS5 with triggers for ~46% storage savings over naive content-stored tables.
 
-**Why not neural embeddings?**
-The "no AI models" constraint. HashingVectorizer gives real vector search quality without any pretrained model, ONNX runtime, or GPU.
-
 **Is the API key required?**
 No. If `ARCHIVIST_API_KEY` is not set, the API endpoints are open.
+
+**What happens when a file is ingested twice?**
+Nothing — the SHA256 tracker records what has been indexed, and unchanged files are skipped on re-ingest.
 
 ## License
 
