@@ -16,15 +16,13 @@ from archivist.ingestion.extractors import (
     chunk_text,
     should_chunk,
     extract_text,
+    cumulative_line_offsets,
 )
 from archivist.ingestion.tracker import Tracker
 from archivist.config import get_settings
 
 
 settings = get_settings()
-
-# Default lines per chunk for code/text files
-_LINES_PER_CHUNK = 1500
 
 
 def ingest_file(
@@ -77,9 +75,10 @@ def ingest_file(
     timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     stat = path.stat()
 
+    offsets = cumulative_line_offsets(chunks)
     for i, chunk_content in enumerate(chunks):
         doc_id = f"{file_hash}_{i:04d}"
-        line_offset = i * _LINES_PER_CHUNK
+        line_offset = offsets[i]
         sq.upsert({
             "doc_id": doc_id,
             "filepath": str(path),

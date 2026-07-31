@@ -558,6 +558,27 @@ def chunk_code_by_lines(text: str, lines_per_chunk: int = 1500) -> list[str]:
     return chunks
 
 
+def cumulative_line_offsets(chunks: list[str]) -> list[int]:
+    """Return the starting line number of each chunk in the original file.
+
+    Chunks have variable sizes (PDF page, DOCX section, CSV rows, code lines),
+    so a fixed per-index offset like ``i * 1500`` yields wrong line numbers for
+    every chunked file type. This computes the true cumulative offset.
+
+    Args:
+        chunks: List of chunk strings in document order.
+
+    Returns:
+        List of starting line offsets, one per chunk.
+    """
+    offsets: list[int] = []
+    total = 0
+    for chunk in chunks:
+        offsets.append(total)
+        total += chunk.count("\n") + 1
+    return offsets
+
+
 def iter_files(root: Path, recursive: bool = True) -> Iterator[Path]:
     """Yield supported files from a directory.
 

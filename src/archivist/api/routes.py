@@ -146,6 +146,7 @@ def _ingest_single_file(
             chunk_text,
             extract_text,
             should_chunk,
+            cumulative_line_offsets,
         )
 
         text = extract_text(filepath)
@@ -168,9 +169,10 @@ def _ingest_single_file(
         timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         stat = filepath.stat()
 
+        offsets = cumulative_line_offsets(chunks)
         for i, chunk_content in enumerate(chunks):
             doc_id = f"{file_hash}_{i:04d}"
-            line_offset = i * 1500
+            line_offset = offsets[i]
             sq.upsert({
                 "doc_id": doc_id,
                 "filepath": display_filepath,

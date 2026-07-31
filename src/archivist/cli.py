@@ -139,7 +139,8 @@ def ingest(
 def _ingest_sqlite(filepath: Path, tracker: Tracker) -> int:
     """Ingest a file into SQLite FTS5 backend.
 
-    Large files are split into multiple chunks (500 lines each).
+    Large files are split into multiple chunks; each chunk records the real
+    starting line number so search snippets point at the right location.
 
     Args:
         filepath: Path to file to ingest.
@@ -148,12 +149,12 @@ def _ingest_sqlite(filepath: Path, tracker: Tracker) -> int:
     Returns:
         Number of chunks created (1 if content, 0 if empty/skipped).
     """
-    import time
     from archivist.ingestion.extractors import (
         extract_text,
         normalize_for_display,
         should_chunk,
         chunk_text,
+        cumulative_line_offsets,
     )
 
     if tracker.is_indexed(filepath):
@@ -184,9 +185,10 @@ def _ingest_sqlite(filepath: Path, tracker: Tracker) -> int:
     timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     stat = filepath.stat()
 
+    offsets = cumulative_line_offsets(chunks)
     for i, chunk_content in enumerate(chunks):
         doc_id = f"{file_hash}_{i:04d}"
-        line_offset = i * 500
+        line_offset = offsets[i]
         sq.upsert({
             "doc_id": doc_id,
             "filepath": str(filepath),
