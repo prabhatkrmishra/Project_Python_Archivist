@@ -200,6 +200,18 @@ def test_extract_excel_xls(tmp_path: Path):
     assert "name: Alice | score: 95.0" in result
 
 
+def test_extract_excel_xls_empty_sheet(tmp_path: Path):
+    """An .xls sheet with zero rows is skipped, not emitted as an empty header."""
+    import xlwt
+
+    wb = xlwt.Workbook()
+    wb.add_sheet("Empty")
+    f = tmp_path / "empty.xls"
+    wb.save(f)
+
+    assert extract_excel(f) == ""
+
+
 def test_extract_excel_empty_sheet(tmp_path: Path):
     from openpyxl import Workbook
 
@@ -268,6 +280,27 @@ def test_extract_jsonl_mixed_types(tmp_path: Path):
     assert "L1: just a string" in result
     assert "L2: 42" in result
     assert "L3: key: value" in result
+
+
+def test_extract_jsonl_list_line(tmp_path: Path):
+    """A JSON array line is dumped as-is rather than flattened."""
+    f = tmp_path / "data.jsonl"
+    f.write_text('[1, 2, "three"]\n')
+    result = extract_jsonl(f)
+    assert 'L1: [1, 2, "three"]' in result
+
+
+def test_read_file_with_fallback_all_encodings_fail():
+    """Bytes rejected by every encoding fall through to errors='replace'."""
+    import archivist.ingestion.extractors as ex
+
+    class WeirdPath:
+        def read_text(self, encoding=None, errors=None):
+            if errors == "replace":
+                return "fallback content"
+            raise UnicodeDecodeError(encoding, b"\xff", 0, 1, "invalid byte")
+
+    assert ex._read_file_with_fallback(WeirdPath()) == "fallback content"
 
 
 # --- Chunking Tests ---
@@ -465,6 +498,19 @@ def test_should_chunk_pdf_over_page_threshold(tmp_path, monkeypatch):
     f = tmp_path / "pages.pdf"
     f.write_bytes(_MINIMAL_PDF)  # 3 pages
     assert should_chunk(f, "")
+
+
+def test_should_chunk_pdf_reader_error_does_not_raise(tmp_path, monkeypatch):
+    """A PdfReader failure is swallowed: size-based chunking still applies."""
+    import archivist.ingestion.extractors as ex
+
+    def boom(path):
+        raise RuntimeError("pdf read failed")
+
+    monkeypatch.setattr(ex.pypdf, "PdfReader", boom)
+    f = tmp_path / "pages.pdf"
+    f.write_bytes(_MINIMAL_PDF)
+    assert should_chunk(f, "") is False
 
 
 # --- cumulative line offsets ---

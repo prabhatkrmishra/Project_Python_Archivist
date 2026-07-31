@@ -80,6 +80,18 @@ class TestExtractSnippetEdgeCases:
         snippet = extract_snippet(content, "find", plain=False)
         assert "[" in snippet
 
+    def test_rich_mode_empty_query(self):
+        content = "one\ntwo\nthree"
+        snippet = extract_snippet(content, "", plain=False)
+        assert "[green]L1" in snippet
+        assert "[/orange] one" in snippet
+
+    def test_rich_mode_no_match_shows_first_lines(self):
+        content = "hello world\nsecond line"
+        snippet = extract_snippet(content, "nope", plain=False)
+        assert "[green]" in snippet
+        assert not any(line.startswith(">") for line in snippet.split("\n"))
+
     def test_single_line_content(self):
         snippet = extract_snippet("just one line", "one", plain=True)
         assert "> L1: just one line" in snippet
