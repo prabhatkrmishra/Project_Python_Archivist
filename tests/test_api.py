@@ -183,6 +183,146 @@ class TestSearch:
         )
         assert r.status_code == 200
 
+    async def _ingest(self, client: AsyncClient, name: str, content: str) -> None:
+        await client.post(
+            "/api/v1/ingest/file",
+            files={"file": (name, io.BytesIO(content.encode()), "text/plain")},
+        )
+
+    async def test_search_file_ext_filter(self, client: AsyncClient):
+        await self._ingest(client, "a.py", "def alpha(): pass  # searchable_term")
+        await self._ingest(client, "b.txt", "plain text searchable_term here")
+
+        r = await client.get(
+            "/api/v1/search", params={"q": "searchable_term", "file_ext": ".py"}
+        )
+        data = r.json()
+        assert data["total"] == 1
+        assert data["results"][0]["filepath"].endswith(".py")
+
+    async def test_search_min_score_filter(self, client: AsyncClient, tmp_path: Path):
+        # BM25 ranks are corpus-relative and collapse toward 0.0 on tiny
+        # collections, so seed a small corpus directly to get meaningful scores.
+        from archivist.search.sqlite_search import SQLiteSearch
+
+        import archivist.api.routes as routes
+
+        sq = SQLiteSearch(routes.settings.sqlite_db)
+        for i in range(20):
+            sq.upsert({
+                "doc_id": f"filler_{i:04d}",
+                "filepath": f"/corpus/filler{i}.txt",
+                "filename": f"filler{i}.txt",
+                "content": "common filler words for ranking context " * 20,
+                "file_hash": f"filler{i}",
+            })
+        sq.upsert({
+            "doc_id": "dense_0000",
+            "filepath": "/corpus/dense.txt",
+            "filename": "dense.txt",
+            "content": "unique_term " * 80 + " common filler words here " * 20,
+            "file_hash": "dense",
+        })
+        sq.upsert({
+            "doc_id": "sparse_0000",
+            "filepath": "/corpus/sparse.txt",
+            "filename": "sparse.txt",
+            "content": "unique_term " + " common filler words everywhere " * 40,
+            "file_hash": "sparse",
+        })
+        sq.close()
+
+        # No threshold: both matches come back.
+        r = await client.get("/api/v1/search", params={"q": "unique_term"})
+        assert r.json()["total"] == 2
+
+        # Threshold between the two scores keeps only the dense match.
+        r = await client.get(
+            "/api/v1/search", params={"q": "unique_term", "min_score": 0.75}
+        )
+        data = r.json()
+        assert data["total"] == 1
+        assert data["results"][0]["filepath"].endswith("dense.txt")
+
+    async def test_search_content_preview_populated(self, client: AsyncClient):
+        body = "preview_term " * 50
+        await self._ingest(client, "preview.txt", body)
+
+        r = await client.get(
+            "/api/v1/search", params={"q": "preview_term", "content_preview": "true"}
+        )
+        data = r.json()
+        assert data["results"][0]["content_preview"]
+        assert len(data["results"][0]["content_preview"]) == 500
+
+    async def test_search_content_preview_empty_by_default(self, client: AsyncClient):
+        await self._ingest(client, "preview2.txt", "preview_term content")
+        r = await client.get("/api/v1/search", params={"q": "preview_term"})
+        assert r.json()["results"][0]["content_preview"] == ""
+
+    async def test_search_all_chunks_via_api(self, client: AsyncClient):
+        import archivist.api.routes as routes
+
+        # Force chunking: code chunks split at 1500 lines, so 2000 lines
+        # produces 2 chunks and 2 search results for one file.
+        routes.settings.api_max_upload_mb = 100
+        lines = "\n".join(f"line {i} alpha_marker" for i in range(2000))
+        await self._ingest(client, "big.py", lines)
+
+        r = await client.get(
+            "/api/v1/search", params={"q": "alpha_marker", "all_chunks": "true"}
+        )
+        data = r.json()
+        assert data["all_chunks"] is True
+        assert data["total"] > 1
+
+        # Without all_chunks the file is deduplicated to a single result.
+        r = await client.get("/api/v1/search", params={"q": "alpha_marker"})
+        assert r.json()["total"] == 1
+
+    async def test_search_pagination_slices_correctly(self, client: AsyncClient):
+        for i in range(5):
+            await self._ingest(client, f"f{i}.txt", f"pagination_marker content {i}")
+
+        r = await client.get(
+            "/api/v1/search",
+            params={"q": "pagination_marker", "size": 2, "offset": 2},
+        )
+        data = r.json()
+        assert data["total"] == 5
+        assert data["limit"] == 2
+        assert data["offset"] == 2
+        assert len(data["results"]) == 2
+
+    async def test_search_offset_beyond_results(self, client: AsyncClient):
+        await self._ingest(client, "only.txt", "single_match_token")
+        r = await client.get(
+            "/api/v1/search", params={"q": "single_match_token", "offset": 10}
+        )
+        data = r.json()
+        assert data["total"] == 1
+        assert data["results"] == []
+
+    async def test_search_special_chars_query_safe(self, client: AsyncClient):
+        await self._ingest(client, "ver.txt", "version 1.0.0-beta of the app")
+        r = await client.get(
+            "/api/v1/search", params={"q": "1.0.0-beta?!"}
+        )
+        assert r.status_code == 200
+
+    async def test_search_missing_query_rejected(self, client: AsyncClient):
+        r = await client.get("/api/v1/search")
+        assert r.status_code == 422
+
+    async def test_search_size_validation(self, client: AsyncClient):
+        for params in ({"q": "x", "size": 0}, {"q": "x", "size": 101}, {"q": "x", "offset": -1}):
+            r = await client.get("/api/v1/search", params=params)
+            assert r.status_code == 422, params
+
+    async def test_search_min_score_validation(self, client: AsyncClient):
+        r = await client.get("/api/v1/search", params={"q": "x", "min_score": 1.5})
+        assert r.status_code == 422
+
 
 # ── Ingest: Single File (synchronous) ─────────────────────────────────────────
 
@@ -259,6 +399,18 @@ class TestIngestFiles:
     async def test_ingest_no_files(self, client: AsyncClient):
         r = await client.post("/api/v1/ingest/files")
         assert r.status_code in (400, 422)
+
+    async def test_ingest_empty_list_rejected_direct(
+        self, client: AsyncClient
+    ):
+        """The `if not files:` guard covers direct empty-list calls."""
+        from fastapi import HTTPException
+
+        import archivist.api.routes as routes
+
+        with pytest.raises(HTTPException) as excinfo:
+            await routes.ingest_files([])
+        assert excinfo.value.status_code == 400
 
 
 # ── Ingest: Archive (async) ───────────────────────────────────────────────────
@@ -340,6 +492,17 @@ class TestIngestDirectory:
         r = await client.post("/api/v1/ingest/directory", json={})
         assert r.status_code == 400
 
+    async def test_ingest_directory_not_a_directory(
+        self, client: AsyncClient, tmp_path: Path
+    ):
+        f = tmp_path / "plain.txt"
+        f.write_text("not a dir")
+        r = await client.post(
+            "/api/v1/ingest/directory", json={"path": str(f)}
+        )
+        assert r.status_code == 400
+        assert "Not a directory" in r.json()["detail"]
+
 
 # ── Documents ─────────────────────────────────────────────────────────────────
 
@@ -391,6 +554,22 @@ class TestDocuments:
         r = await client.get("/api/v1/documents", params={"file_ext": ".py"})
         data = r.json()
         assert all(".py" in d["filepath"] for d in data["documents"])
+
+    async def test_list_documents_filter_hash(self, client: AsyncClient, tmp_path: Path):
+        for name, content in [("h1.txt", "hash filter one"), ("h2.txt", "hash filter two")]:
+            c = _make_text_file(name, content)
+            await client.post(
+                "/api/v1/ingest/file",
+                files={"file": (name, io.BytesIO(c), "text/plain")},
+            )
+
+        docs = (await client.get("/api/v1/documents")).json()["documents"]
+        target_hash = docs[0]["file_hash"]
+
+        r = await client.get("/api/v1/documents", params={"file_hash": target_hash})
+        data = r.json()
+        assert data["total"] >= 1
+        assert all(d["file_hash"] == target_hash for d in data["documents"])
 
     async def test_get_document_not_found(self, client: AsyncClient):
         r = await client.get("/api/v1/documents/nonexistent_id")
@@ -475,6 +654,67 @@ class TestJobs:
         r = await client.get("/api/v1/jobs/does-not-exist")
         assert r.status_code == 404
 
+    async def test_job_worker_reports_per_file_error(
+        self, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        import archivist.api.routes as routes
+
+        def boom(filepath, tracker, root_dir=None):
+            raise RuntimeError("simulated failure")
+
+        monkeypatch.setattr(routes, "_ingest_single_file", boom)
+
+        job_id = "job-error-1"
+        bad_file = tmp_path / "bad.txt"
+        bad_file.write_text("x")
+        routes._jobs[job_id] = {
+            "job_id": job_id,
+            "status": "pending",
+            "total_files": 1,
+            "processed_files": 0,
+            "current_file": "",
+            "elapsed_seconds": 0.0,
+            "error": None,
+            "result": None,
+            "_tmp_dir": tmp_path,
+        }
+        routes._run_ingest_job(job_id, [bad_file], tmp_path)
+
+        r = await client.get(f"/api/v1/jobs/{job_id}")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "done"
+        assert body["result"]["files"][0]["status"] == "error"
+        assert "simulated failure" in body["result"]["files"][0]["error"]
+
+    async def test_job_cleaned_up_after_30s(
+        self, client: AsyncClient, tmp_path: Path
+    ):
+        import time
+
+        import archivist.api.routes as routes
+
+        r = await client.post(
+            "/api/v1/ingest/files",
+            files=[("files", ("a.txt", io.BytesIO(b"cleanup me"), "text/plain"))],
+        )
+        job_id = r.json()["job_id"]
+        await _poll_job(client, job_id)
+
+        # Simulate the 30s window passing, then poll twice: the first poll
+        # returns the final response and removes the job + temp dir, the
+        # second hits 404.
+        routes._jobs[job_id]["_finished_at"] = time.time() - 31
+        tmp = routes._jobs[job_id]["_tmp_dir"]
+
+        r = await client.get(f"/api/v1/jobs/{job_id}")
+        assert r.status_code == 200
+        assert r.json()["status"] == "done"
+        assert not tmp.exists()
+
+        r = await client.get(f"/api/v1/jobs/{job_id}")
+        assert r.status_code == 404
+
 
 # ── Ingest: error paths ───────────────────────────────────────────────────────
 
@@ -526,6 +766,19 @@ class TestIngestDirectoryUpload:
         stored = (await client.get("/api/v1/documents")).json()["documents"][0]["filepath"]
         assert stored.replace("\\", "/") == "myfolder/sub/a.txt"
 
+    async def test_empty_relative_path_skipped(self, client: AsyncClient):
+        """A blank line in `paths` skips that file instead of writing it."""
+        r = await client.post(
+            "/api/v1/ingest/directory/upload",
+            files=[
+                ("files", ("ignored.txt", io.BytesIO(b"junk"), "text/plain")),
+                ("files", ("myfolder/sub/a.txt", io.BytesIO(b"real file"), "text/plain")),
+            ],
+            data={"paths": "\nmyfolder/sub/a.txt"},
+        )
+        assert r.status_code == 200
+        assert r.json()["total_files"] == 1
+
 
 # ── Ingest: archive analyze + errors ──────────────────────────────────────────
 
@@ -551,6 +804,19 @@ class TestIngestArchiveEdges:
         body = r.json()
         assert body["valid"] is False
         assert body["error"]
+
+    async def test_analyze_archive_too_large(self, client: AsyncClient):
+        import archivist.api.routes as routes
+
+        routes.settings.api_max_upload_mb = 0
+        r = await client.post(
+            "/api/v1/archive/analyze",
+            files={"file": ("x.zip", io.BytesIO(b"x"), "application/zip")},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["valid"] is False
+        assert "too large" in body["error"].lower()
 
     async def test_ingest_archive_too_large(self, client: AsyncClient):
         import archivist.api.routes as routes
