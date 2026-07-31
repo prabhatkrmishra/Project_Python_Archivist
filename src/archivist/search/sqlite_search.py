@@ -328,10 +328,8 @@ class SQLiteSearch:
         _FTS_TERM_SAFE = re.compile(r"[^\w]+", re.UNICODE)
         terms = []
         for t in query.split():
-            t = t.strip()
-            if not t:
-                continue
-            # Replace non-word characters with spaces, collapse multiple spaces
+            # split() tokens are always non-empty and whitespace-free.
+            # Replace non-word characters with spaces, collapse multiple spaces.
             t = _FTS_TERM_SAFE.sub(' ', t)
             t = re.sub(r'\s+', ' ', t).strip()
             if t:

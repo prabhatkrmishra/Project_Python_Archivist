@@ -501,14 +501,10 @@ def chunk_csv_by_rows(text: str, rows_per_chunk: int = 1000) -> list[str]:
         List of text chunks.
     """
     lines = text.split("\n")
-    if not lines:
-        return [text]
-
     header = lines[0]
     data_lines = lines[1:]
     if not data_lines:
         return [text]
-
     chunks: list[str] = []
     for i in range(0, len(data_lines), rows_per_chunk):
         chunk_lines = [header] + data_lines[i : i + rows_per_chunk]
@@ -527,8 +523,6 @@ def chunk_jsonl_by_lines(text: str, lines_per_chunk: int = 500) -> list[str]:
         List of text chunks.
     """
     lines = text.split("\n")
-    if not lines:
-        return [text]
 
     chunks: list[str] = []
     for i in range(0, len(lines), lines_per_chunk):
