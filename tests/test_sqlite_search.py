@@ -250,3 +250,124 @@ def test_search_all_chunks_returns_multiple_per_file(tmp_db: Path):
     offsets = {r["line_offset"] for r in results}
     assert offsets == {0, 500, 1000}
     sq.close()
+
+
+def _upsert(sq: SQLiteSearch, doc_id: str, filepath: str, content: str, file_hash: str = "h"):
+    sq.upsert({
+        "doc_id": doc_id,
+        "filepath": filepath,
+        "filename": Path(filepath).name,
+        "content": content,
+        "file_size": 100,
+        "modified_at": "2026-01-01T00:00:00Z",
+        "ingested_at": "2026-01-01T00:00:00Z",
+        "file_hash": file_hash,
+    })
+
+
+# ── Dedup and ranking semantics ───────────────────────────────────────────────
+
+
+class TestDedupAndRanking:
+    def test_best_chunk_per_file_is_kept(self, tmp_db: Path):
+        sq = SQLiteSearch(tmp_db)
+        # Same filepath, two chunks; chunk 0 is dense with the term, chunk 1
+        # has one occurrence drowned in filler - chunk 0 must win dedup.
+        _upsert(sq, "f_0000", "/docs/report.txt", "budget " * 20)
+        _upsert(sq, "f_0001", "/docs/report.txt", "budget " + "zzz " * 100)
+        results = sq.search("budget")
+        assert len(results) == 1
+        assert results[0]["doc_id"] == "f_0000"
+        sq.close()
+
+    def test_results_sorted_by_score_desc(self, tmp_db: Path):
+        sq = SQLiteSearch(tmp_db)
+        _upsert(sq, "a_0000", "/docs/a.txt", "budget")
+        _upsert(sq, "b_0000", "/docs/b.txt", "budget " * 10)
+        results = sq.search("budget")
+        assert len(results) == 2
+        assert results[0]["doc_id"] == "b_0000"
+        assert results[0]["score"] >= results[1]["score"]
+        sq.close()
+
+    def test_scores_are_bounded(self, tmp_db: Path):
+        sq = SQLiteSearch(tmp_db)
+        _upsert(sq, "a_0000", "/docs/a.txt", "budget " * 50)
+        results = sq.search("budget")
+        assert 0.0 <= results[0]["score"] <= 1.0
+        sq.close()
+
+    def test_context_manager_closes_connection(self, tmp_db: Path):
+        with SQLiteSearch(tmp_db) as sq:
+            _upsert(sq, "a_0000", "/docs/a.txt", "hello context")
+            assert len(sq.search("hello")) == 1
+        # Connection is closed; further use raises.
+        import sqlite3
+        with pytest.raises(sqlite3.ProgrammingError):
+            sq.search("hello")
+
+
+# ── Query edge cases ──────────────────────────────────────────────────────────
+
+
+class TestQueryEdgeCases:
+    def test_empty_query_returns_no_results(self, tmp_db: Path):
+        sq = SQLiteSearch(tmp_db)
+        _upsert(sq, "a_0000", "/docs/a.txt", "something searchable")
+        assert sq.search("") == []
+        sq.close()
+
+    def test_punctuation_only_query(self, tmp_db: Path):
+        sq = SQLiteSearch(tmp_db)
+        _upsert(sq, "a_0000", "/docs/a.txt", "something searchable")
+        assert sq.search("!!!??") == []
+        sq.close()
+
+    def test_diacritics_are_removed(self, tmp_db: Path):
+        sq = SQLiteSearch(tmp_db)
+        _upsert(sq, "a_0000", "/docs/a.txt", "the cafe opens at noon")
+        # "café" with an accent matches "cafe" via remove_diacritics.
+        assert len(sq.search("café")) == 1
+        sq.close()
+
+    def test_prefix_matching(self, tmp_db: Path):
+        sq = SQLiteSearch(tmp_db)
+        _upsert(sq, "a_0000", "/docs/a.txt", "ShadowTrackerExtraComponent defined here")
+        assert len(sq.search("ShadowTracker")) == 1
+        sq.close()
+
+    def test_special_chars_query_does_not_crash(self, tmp_db: Path):
+        sq = SQLiteSearch(tmp_db)
+        _upsert(sq, "a_0000", "/docs/a.txt", "version 1.0.0-beta of the app")
+        assert len(sq.search("1.0.0-beta")) == 1
+        assert len(sq.search('quoted "phrase"')) == 0
+        sq.close()
+
+
+# ── Stats semantics ───────────────────────────────────────────────────────────
+
+
+class TestStatsSemantics:
+    def test_stats_count_file_once_per_hash(self, tmp_db: Path):
+        sq = SQLiteSearch(tmp_db)
+        for i in range(3):
+            _upsert(
+                sq,
+                f"multi_{i:04d}",
+                "/docs/big.py",
+                f"chunk {i} content",
+                file_hash="single_file",
+            )
+        stats = sq.stats()
+        assert stats["points_count"] == 3
+        assert stats["unique_files"] == 1
+        assert stats["total_content_size_bytes"] == 100  # counted once
+        sq.close()
+
+    def test_stats_unique_extensions(self, tmp_db: Path):
+        sq = SQLiteSearch(tmp_db)
+        _upsert(sq, "a_0000", "/docs/a.txt", "alpha")
+        _upsert(sq, "b_0000", "/docs/b.py", "beta")
+        stats = sq.stats()
+        assert stats["unique_extensions"] == 2
+        sq.close()

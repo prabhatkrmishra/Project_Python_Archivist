@@ -1,8 +1,11 @@
 from pathlib import Path
 
+import pytest
+
 
 from archivist.ingestion.extractors import (
     SUPPORTED_EXTENSIONS,
+    UnsupportedFileType,
     normalize_text,
     sha256_file,
     should_chunk,
@@ -10,9 +13,26 @@ from archivist.ingestion.extractors import (
     extract_csv,
     extract_excel,
     extract_jsonl,
+    extract_text,
+    chunk_text,
     chunk_csv_by_rows,
     chunk_jsonl_by_lines,
     chunk_code_by_lines,
+    cumulative_line_offsets,
+)
+
+
+# Minimal 3-page PDF with no text; enough for page-count based logic.
+_MINIMAL_PDF = (
+    b"%PDF-1.4\n"
+    b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
+    b"2 0 obj\n<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 >>\nendobj\n"
+    b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >>\nendobj\n"
+    b"4 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >>\nendobj\n"
+    b"5 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >>\nendobj\n"
+    b"xref\n0 6\n0000000000 65535 f \n0000000009 00000 n \n0000000058 00000 n \n"
+    b"0000000115 00000 n \n0000000216 00000 n \n0000000317 00000 n \n"
+    b"trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n400\n%%EOF\n"
 )
 
 
@@ -344,3 +364,117 @@ def test_chunk_code_by_lines_preserves_content(tmp_path: Path):
     chunk2_lines = chunks[1].split("\n")
     assert len(chunk2_lines) == 1500
     assert chunk2_lines[0] == "line1500"
+
+# --- Edge cases: delimiter fallback, empty inputs, unsupported types ---
+
+
+def test_extract_csv_delimiter_fallback(tmp_path):
+    """Sniffer fails on freeform text; extraction falls back to comma default."""
+    f = tmp_path / "freeform.csv"
+    f.write_text("just some freeform text\nwith a second line\n")
+    result = extract_csv(f)
+    assert "just some freeform text" in result
+
+
+def test_extract_csv_empty_header_cell(tmp_path):
+    f = tmp_path / "data.csv"
+    f.write_text(",city\nAlice,NYC\n")
+    result = extract_csv(f)
+    assert "Alice" in result
+
+
+def test_extract_csv_empty_file(tmp_path):
+    f = tmp_path / "empty.csv"
+    f.write_text("")
+    assert extract_csv(f) == ""
+
+
+def test_extract_csv_only_blank_rows(tmp_path):
+    f = tmp_path / "blank.csv"
+    f.write_text("\n\n\n")
+    assert extract_csv(f) == ""
+
+
+def test_extract_text_unsupported_extension(tmp_path):
+    f = tmp_path / "image.jpg"
+    f.write_bytes(b"\xff\xd8\xff\xe0")
+    with pytest.raises(UnsupportedFileType):
+        extract_text(f)
+
+
+def test_chunk_text_unknown_type_returns_single(tmp_path):
+    # .xlsx is supported for extraction but has no dedicated chunker.
+    f = tmp_path / "data.xlsx"
+    f.write_bytes(b"")
+    assert chunk_text(f, "some content") == ["some content"]
+
+
+def test_chunk_csv_by_rows_empty_text():
+    assert chunk_csv_by_rows("") == [""]
+
+
+def test_chunk_csv_by_rows_header_only():
+    assert chunk_csv_by_rows("name,age") == ["name,age"]
+
+
+def test_chunk_jsonl_by_lines_empty_text():
+    assert chunk_jsonl_by_lines("") == [""]
+
+
+def test_iter_files_finds_extensionless_build_files(tmp_path):
+    (tmp_path / "Makefile").write_text("all:\n\techo hi\n")
+    (tmp_path / "Dockerfile").write_text("FROM python\n")
+    files = list(iter_files(tmp_path))
+    assert {f.name for f in files} == {"Makefile", "Dockerfile"}
+
+
+# --- should_chunk thresholds (monkeypatched to keep fixtures small) ---
+
+
+def test_should_chunk_code_over_line_threshold(tmp_path, monkeypatch):
+    import archivist.ingestion.extractors as ex
+
+    monkeypatch.setattr(ex, "_CHUNK_THRESHOLD_BYTES", 10 * 1024 * 1024)
+    f = tmp_path / "big.py"
+    f.write_text("\n".join(f"line{i}" for i in range(501)))
+    assert should_chunk(f, f.read_text())
+
+
+def test_should_chunk_csv_over_row_threshold(tmp_path, monkeypatch):
+    import archivist.ingestion.extractors as ex
+
+    monkeypatch.setattr(ex, "_CHUNK_THRESHOLD_BYTES", 10 * 1024 * 1024)
+    f = tmp_path / "big.csv"
+    f.write_text("\n".join([f"row{i}" for i in range(5001)]))
+    assert should_chunk(f, f.read_text())
+
+
+def test_should_chunk_jsonl_over_line_threshold(tmp_path, monkeypatch):
+    import archivist.ingestion.extractors as ex
+
+    monkeypatch.setattr(ex, "_CHUNK_THRESHOLD_BYTES", 10 * 1024 * 1024)
+    f = tmp_path / "big.jsonl"
+    f.write_text("\n".join([f'{{"i": {i}}}' for i in range(10001)]))
+    assert should_chunk(f, f.read_text())
+
+
+def test_should_chunk_pdf_over_page_threshold(tmp_path, monkeypatch):
+    import archivist.ingestion.extractors as ex
+
+    monkeypatch.setattr(ex, "_CHUNK_THRESHOLD_PAGES", 2)
+    f = tmp_path / "pages.pdf"
+    f.write_bytes(_MINIMAL_PDF)  # 3 pages
+    assert should_chunk(f, "")
+
+
+# --- cumulative line offsets ---
+
+
+def test_cumulative_line_offsets_variable_chunk_sizes():
+    chunks = ["a\nb\nc", "d\ne", "f"]
+    assert cumulative_line_offsets(chunks) == [0, 3, 5]
+
+
+def test_cumulative_line_offsets_empty_chunks():
+    assert cumulative_line_offsets([]) == []
+    assert cumulative_line_offsets(["", "x"]) == [0, 1]

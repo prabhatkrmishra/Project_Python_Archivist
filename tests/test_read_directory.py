@@ -189,3 +189,30 @@ class TestMempalaceLogic:
         assert "Skip:" in labels2
         assert "Found:" in labels2
         tracker.close()
+
+
+# ── Tracker: clear and error paths ────────────────────────────────────────────
+
+
+class TestTrackerEdges:
+    def test_tracker_clear(self, tmp_path: Path):
+        tracker = Tracker(tmp_path / "t.db")
+        f = tmp_path / "a.txt"
+        f.write_text("content")
+        ingest_file(f, tracker, chunk=False)
+        assert tracker.stats()["indexed_files"] == 1
+        tracker.clear()
+        assert tracker.stats()["indexed_files"] == 0
+        assert not tracker.is_indexed(f)
+        tracker.close()
+
+    def test_is_indexed_handles_permission_error(self, tmp_path: Path, monkeypatch):
+        import archivist.ingestion.tracker as tracker_module
+
+        f = tmp_path / "locked.txt"
+        f.write_text("content")
+        monkeypatch.setattr(tracker_module, "_hash", lambda path: (_ for _ in ()).throw(PermissionError()))
+        tracker = Tracker(tmp_path / "t.db")
+        # Unreadable files count as not-yet-indexed instead of crashing.
+        assert tracker.is_indexed(f) is False
+        tracker.close()

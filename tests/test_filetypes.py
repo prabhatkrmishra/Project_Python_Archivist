@@ -56,6 +56,7 @@ def _setup_ingest(tmp_path: Path, filename: str, content: str | bytes, ext: str)
     tracker = Tracker(tmp_path / "tracker.db")
     db_path = tmp_path / "test.db"
     count = ingest_file(f, tracker, db_path=db_path)
+    tracker.close()
     search = SQLiteSearch(db_path)
     return search, count
 
@@ -650,6 +651,7 @@ class TestPDF:
         tracker = Tracker(tmp_path / "tracker.db")
         db_path = tmp_path / "test.db"
         ingest_file(f, tracker, db_path=db_path)
+        tracker.close()
         # Minimal PDF has no extractable text; ingest_file returns 0
         search = SQLiteSearch(db_path)
         stats = search.stats()
@@ -698,6 +700,7 @@ class TestDOCX:
         results = search.search("Revenue")
         assert len(results) > 0
         search.close()
+        tracker.close()
 
 
 # ── Excel ─────────────────────────────────────────────────────────────────────
@@ -742,6 +745,7 @@ class TestExcel:
         results = search.search("Widget")
         assert len(results) > 0
         search.close()
+        tracker.close()
 
 
 # ── CSV / TSV ─────────────────────────────────────────────────────────────────
@@ -1052,6 +1056,7 @@ class TestXmlIngestion:
         assert len(results) > 0
         assert "books.xml" in results[0]["filepath"]
         search.close()
+        tracker.close()
 
     def test_ingest_large_xml(self, tmp_path: Path):
         tracker = Tracker(tmp_path / "tracker.db")
@@ -1065,6 +1070,7 @@ class TestXmlIngestion:
         results = search.search("Employee 150", all_chunks=True)
         assert len(results) > 0
         search.close()
+        tracker.close()
 
     def test_ingest_xml_with_special_chars(self, tmp_path: Path):
         tracker = Tracker(tmp_path / "tracker.db")
@@ -1078,6 +1084,7 @@ class TestXmlIngestion:
         results = search.search("api example")
         assert len(results) > 0
         search.close()
+        tracker.close()
 
     def test_ingest_xml_produces_correct_doc_id(self, tmp_path: Path):
         tracker = Tracker(tmp_path / "tracker.db")
@@ -1085,6 +1092,7 @@ class TestXmlIngestion:
         f.write_text(_SIMPLE_XML)
 
         ingest_file(f, tracker, db_path=tmp_path / "test.db")
+        tracker.close()
 
         search = SQLiteSearch(tmp_path / "test.db")
         stats = search.stats()
@@ -1101,6 +1109,7 @@ class TestXmlFts5Search:
         f = tmp_path / "data.xml"
         f.write_text(xml_content)
         ingest_file(f, tracker, db_path=tmp_path / "test.db")
+        tracker.close()
         return SQLiteSearch(tmp_path / "test.db")
 
     def test_search_xml_title(self, tmp_path: Path):
