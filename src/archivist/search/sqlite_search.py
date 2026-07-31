@@ -202,7 +202,11 @@ class SQLiteSearch:
             raw_rank = row[9] if row[9] is not None else 0.0
             score = min(1.0, max(0.0, abs(raw_rank) / (1.0 + abs(raw_rank))))
             filepath = row[1]
-            if filepath not in best_per_file or score > best_per_file[filepath]["score"]:
+            entry = best_per_file.get(filepath)
+            # Compare against the unrounded score: rounding to 4 decimals
+            # collapses small BM25 scores to 0.0 and would let a worse
+            # chunk replace the best one.
+            if entry is None or score > entry["_raw_score"]:
                 best_per_file[filepath] = {
                     "doc_id": row[0],
                     "filepath": filepath,
@@ -214,9 +218,12 @@ class SQLiteSearch:
                     "ingested_at": row[7],
                     "file_hash": row[8],
                     "score": round(score, 4),
+                    "_raw_score": score,
                 }
 
-        results = sorted(best_per_file.values(), key=lambda r: -r["score"])
+        results = sorted(best_per_file.values(), key=lambda r: -r["_raw_score"])
+        for r in results:
+            r.pop("_raw_score", None)
         return results
 
     def delete(self, doc_id: str):
@@ -310,22 +317,23 @@ class SQLiteSearch:
         Returns:
             FTS5-compatible query string.
         """
-        # Replace FTS5-dangerous characters with spaces
-        # - → AND NOT (column lookup with digits)
-        # + → require operator
-        # @ / → syntax errors
-        # * → prefix operator (we add our own)
-        # " ( ) → grouping/phrase
-        # \ → escape char (causes "syntax error near \")
-        _FTS_DANGEROUS = re.compile(r'[-+@"()/\\*$.%&!#<>=]')
+        # FTS5 has strict query syntax: `-` `+` `@` `/` `*` `"` `(` `)` `\`
+        # are operators, `:` is a column filter, and stray punctuation like
+        # `?` can raise "fts5: syntax error". Rather than maintaining a
+        # blacklist (which missed characters and let them through to crash
+        # the query), whitelist word characters: every term is reduced to
+        # letters, digits, and underscores, then split back into tokens.
+        # "ISBN-9780000000014" becomes "isbn 9780000000014" and matches both
+        # tokens.
+        _FTS_TERM_SAFE = re.compile(r"[^\w]+", re.UNICODE)
         terms = []
         for t in query.split():
             t = t.strip()
             if not t:
                 continue
-            # Replace dangerous chars with space, collapse multiple spaces
-            t = _FTS_DANGEROUS.sub(' ', t).strip()
-            t = re.sub(r'\s+', ' ', t)
+            # Replace non-word characters with spaces, collapse multiple spaces
+            t = _FTS_TERM_SAFE.sub(' ', t)
+            t = re.sub(r'\s+', ' ', t).strip()
             if t:
                 terms.append(t.lower())
         if not terms:
