@@ -9,7 +9,7 @@ COPY pyproject.toml .
 COPY src/ src/
 RUN pip install --no-cache-dir .
 
-ENV DATA_DIR=/home/user/archivist
+ENV ARCHIVIST_DATA_DIR=/home/user/archivist
 ENV HOME=/home/user
 
 USER user

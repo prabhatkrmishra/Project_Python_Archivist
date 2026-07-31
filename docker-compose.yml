@@ -6,6 +6,6 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - API_KEY=${API_KEY:-archivist-dev-key}
+      - ARCHIVIST_API_KEY=${ARCHIVIST_API_KEY:-archivist-dev-key}
     volumes:
       - ./data:/data

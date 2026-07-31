@@ -52,7 +52,7 @@ Type=simple
 User=archivist
 Group=archivist
 WorkingDirectory=/opt/archivist/app
-Environment=DATA_DIR=/var/lib/archivist
+Environment=ARCHIVIST_DATA_DIR=/var/lib/archivist
 ExecStart=/opt/archivist/app/.venv/bin/uvicorn archivist.main:create_app \
     --factory \
     --host 0.0.0.0 \
