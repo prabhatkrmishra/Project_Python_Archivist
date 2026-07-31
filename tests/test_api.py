@@ -446,7 +446,9 @@ class TestArchiveUtilities:
         assert len(files) == 0
 
     def test_extract_zip_corrupt(self, tmp_path: Path):
-        with pytest.raises(ArchiveError, match="Invalid ZIP"):
+        # Magic-byte validation runs before extraction and rejects the fake
+        # bytes with its own message rather than the zipfile parser error.
+        with pytest.raises(ArchiveError, match="contents don't match"):
             extract_archive(b"not a zip", "bad.zip", dest=tmp_path)
 
     def test_extract_unsupported_format(self, tmp_path: Path):
