@@ -79,6 +79,123 @@ class TestIngestCommand:
         assert data["errors"] == 1
         assert data["files"][0]["status"] == "error"
 
+    # ── non-JSON output ────────────────────────────────────────────────────────
+
+    def test_ingest_non_json_progress(self, runner: CliRunner, docs_dir: Path):
+        result = runner.invoke(app, ["ingest", str(docs_dir)])
+        assert result.exit_code == 0
+        assert "Ingesting:" in result.output
+        assert "Ingesting 3 files (0 already indexed)" in result.output
+        for name in ("a.txt", "b.txt", "notes.md"):
+            assert f"{name} ->" in result.output
+        assert "Ingestion complete: 3 files" in result.output
+
+    def test_ingest_non_json_already_indexed(self, runner: CliRunner, docs_dir: Path):
+        _invoke_json(runner, ["ingest", str(docs_dir), "--json"])
+        result = runner.invoke(app, ["ingest", str(docs_dir)])
+        assert result.exit_code == 0
+        assert "Ingesting 0 files (3 already indexed)" in result.output
+
+    def test_ingest_missing_path_non_json(self, runner: CliRunner, tmp_path: Path):
+        result = runner.invoke(app, ["ingest", str(tmp_path / "nope")])
+        assert result.exit_code == 1
+        assert "Path not found" in result.output
+
+    def test_ingest_permission_error_skips_file(
+        self, runner: CliRunner, docs_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        import archivist.cli as cli
+
+        class LockedTracker:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def is_indexed(self, path):
+                raise PermissionError("denied")
+
+            def record(self, *args, **kwargs):
+                pass
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(cli, "Tracker", LockedTracker)
+        result = runner.invoke(app, ["ingest", str(docs_dir)])
+        assert result.exit_code == 0
+        assert "3 already indexed" in result.output
+
+    def test_ingest_non_json_reports_errors(
+        self, runner: CliRunner, docs_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        import archivist.cli as cli
+
+        def boom(filepath, tracker):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(cli, "_ingest_sqlite", boom)
+        result = runner.invoke(app, ["ingest", str(docs_dir)])
+        assert result.exit_code == 0
+        assert "ERR boom" in result.output
+        assert "3 errors" in result.output
+
+    def test_ingest_missing_path_json_error(self, runner: CliRunner, tmp_path: Path):
+        result = runner.invoke(app, ["ingest", str(tmp_path / "nope"), "--json"])
+        assert result.exit_code == 1
+        assert json.loads(result.output)["error"]
+
+
+# ── _ingest_sqlite internals ──────────────────────────────────────────────────
+
+
+class TestIngestSqlite:
+    def test_already_indexed_returns_zero(self, runner: CliRunner, docs_dir: Path):
+        import archivist.cli as cli
+        from archivist.ingestion.tracker import Tracker
+
+        _invoke_json(runner, ["ingest", str(docs_dir), "--json"])
+
+        tracker = Tracker(cli.settings.tracker_db)
+        try:
+            assert cli._ingest_sqlite(docs_dir / "a.txt", tracker) == 0
+        finally:
+            tracker.close()
+
+    def test_empty_text_records_and_returns_zero(
+        self, runner: CliRunner, tmp_path: Path
+    ):
+        import archivist.cli as cli
+        from archivist.ingestion.tracker import Tracker
+
+        src = tmp_path / "blank"
+        src.mkdir()
+        (src / "blank.txt").write_text("   \n\t\n  ")
+
+        tracker = Tracker(cli.settings.tracker_db)
+        try:
+            assert cli._ingest_sqlite(src / "blank.txt", tracker) == 0
+            assert tracker.stats()["indexed_files"] == 1
+        finally:
+            tracker.close()
+
+    def test_chunked_file_splits_into_multiple_chunks(
+        self, runner: CliRunner, tmp_path: Path
+    ):
+        import archivist.cli as cli
+        from archivist.ingestion.tracker import Tracker
+
+        src = tmp_path / "bigcode"
+        src.mkdir()
+        # Code chunks split at 1500 lines, so 1600 lines -> 2 chunks.
+        lines = "\n".join(f"def func_{i}(): pass" for i in range(1600))
+        (src / "big.py").write_text(lines)
+
+        tracker = Tracker(cli.settings.tracker_db)
+        try:
+            n = cli._ingest_sqlite(src / "big.py", tracker)
+        finally:
+            tracker.close()
+        assert n == 2
+
 
 # ── search ─────────────────────────────────────────────────────────────────────
 
@@ -109,6 +226,21 @@ class TestSearchCommand:
         data = _invoke_json(runner, ["search", "project", "--json", "--all"])
         assert data["all_chunks"] is True
 
+    # ── non-JSON output ────────────────────────────────────────────────────────
+
+    def test_search_non_json_no_results(self, runner: CliRunner):
+        result = runner.invoke(app, ["search", "zzz_no_match"])
+        assert result.exit_code == 0
+        assert "No results found." in result.output
+
+    def test_search_non_json_prints_hits(self, runner: CliRunner):
+        result = runner.invoke(app, ["search", "quarterly"])
+        assert result.exit_code == 0
+        assert "a.txt" in result.output
+        assert "score=" in result.output
+        # The rich snippet for a matching doc is printed too.
+        assert "quarterly" in result.output
+
 
 # ── status ─────────────────────────────────────────────────────────────────────
 
@@ -125,6 +257,14 @@ class TestStatusCommand:
         data = _invoke_json(runner, ["status", "--json"])
         assert data["points_count"] >= 3
         assert data["tracker_files"] == 3
+
+    def test_status_non_json(self, runner: CliRunner, docs_dir: Path):
+        _invoke_json(runner, ["ingest", str(docs_dir), "--json"])
+        result = runner.invoke(app, ["status"])
+        assert result.exit_code == 0
+        assert "Index status:" in result.output
+        assert "backend: sqlite-fts5" in result.output
+        assert "tracker_files: 3" in result.output
 
 
 # ── delete ─────────────────────────────────────────────────────────────────────
@@ -152,6 +292,12 @@ class TestClearCommand:
         result = runner.invoke(app, ["clear"])
         assert result.exit_code != 0
 
+    def test_clear_aborts_when_prompt_declined(self, runner: CliRunner):
+        # Typer does not emit --no-confirm when a prompt is attached to the
+        # option; declining happens by answering 'n' (or Ctrl+C) at the prompt.
+        result = runner.invoke(app, ["clear"], input="n\n")
+        assert result.exit_code != 0
+
     def test_clear_removes_databases(self, runner: CliRunner, docs_dir: Path):
         _invoke_json(runner, ["ingest", str(docs_dir), "--json"])
 
@@ -161,3 +307,24 @@ class TestClearCommand:
         import archivist.cli as cli
         assert not cli.settings.sqlite_db.exists()
         assert not cli.settings.tracker_db.exists()
+
+
+# ── _fmt_duration ─────────────────────────────────────────────────────────────
+
+
+class TestFmtDuration:
+    def test_seconds_only(self):
+        import archivist.cli as cli
+
+        assert cli._fmt_duration(45) == "45s"
+        assert cli._fmt_duration(0) == "0s"
+
+    def test_minutes_and_seconds(self):
+        import archivist.cli as cli
+
+        assert cli._fmt_duration(150) == "2m 30s"
+
+    def test_hours_minutes_seconds(self):
+        import archivist.cli as cli
+
+        assert cli._fmt_duration(3700) == "1h 1m 40s"
