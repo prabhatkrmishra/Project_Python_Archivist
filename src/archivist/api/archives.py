@@ -239,7 +239,12 @@ def _analyze_7z(file_bytes: bytes) -> tuple[int, int]:
 
 
 def _analyze_rar(file_bytes: bytes) -> tuple[int, int]:
-    """Open a rar in a scratch temp file, verify integrity, count/size members."""
+    """Open a rar in a scratch temp file, verify integrity, count/size members.
+
+    rarfile reads stored (uncompressed) RAR4 members in-process, so archives
+    with only stored members work without any external binary; compressed
+    members still require unrar/bsdtar to be available to rarfile.
+    """
     try:
         import rarfile
     except ImportError:
@@ -391,7 +396,9 @@ def _extract_rar(data: bytes, dest: Path) -> list[Path]:
         List of extracted file paths.
 
     Raises:
-        ArchiveError: If extraction fails or unrar is not available.
+        ArchiveError: If extraction fails or unrar is not available. Note that
+            stored RAR4 members are extracted in-process by rarfile; the
+            external tool is only needed for compressed members.
     """
     try:
         import rarfile
