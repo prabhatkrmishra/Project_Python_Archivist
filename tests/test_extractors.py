@@ -1,6 +1,5 @@
 from pathlib import Path
 
-import pytest
 
 from archivist.ingestion.extractors import (
     SUPPORTED_EXTENSIONS,
@@ -8,8 +7,6 @@ from archivist.ingestion.extractors import (
     sha256_file,
     should_chunk,
     iter_files,
-    chunk_pdf_by_page,
-    chunk_docx_by_section,
     extract_csv,
     extract_excel,
     extract_jsonl,

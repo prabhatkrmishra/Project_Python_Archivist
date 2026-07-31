@@ -24,7 +24,7 @@ from archivist.ingestion.tracker import Tracker
 from archivist.search.sqlite_search import SQLiteSearch
 from archivist.utils.text import extract_snippet
 
-from .archives import ArchiveError, analyze_archive, extract_archive, is_archive
+from .archives import ArchiveError, analyze_archive, extract_archive
 from .schemas import (
     DocumentInfo,
     DocumentsResponse,
@@ -74,7 +74,6 @@ def _run_ingest_job(
     start = time.time()
     total = len(filepaths)
     results: list[IngestedFile] = []
-    tmp_dir = _jobs[job_id].get("_tmp_dir")
 
     _update_job(job_id, status="running", total_files=total, processed_files=0)
 

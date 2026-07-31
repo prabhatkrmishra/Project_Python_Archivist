@@ -10,7 +10,6 @@ from pathlib import Path
 import pytest
 
 from archivist.ingestion.extractors import (
-    SUPPORTED_EXTENSIONS,
     chunk_docx_by_section,
     chunk_pdf_by_page,
     chunk_text,

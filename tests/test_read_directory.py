@@ -5,17 +5,13 @@ and exact CLI output string matching.
 """
 from __future__ import annotations
 
-import tempfile
 from pathlib import Path
-from unittest.mock import patch
 
-import pytest
 from docx import Document as DocxDoc
 
 from archivist.ingestion.extractors import iter_files, SUPPORTED_EXTENSIONS
 from archivist.ingestion.pipeline import ingest_file
 from archivist.ingestion.tracker import Tracker
-from archivist.search.sqlite_search import SQLiteSearch
 
 
 _MINIMAL_PDF = (
