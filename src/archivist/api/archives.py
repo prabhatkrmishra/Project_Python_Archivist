@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import tempfile
 import zipfile
+import zlib
 from io import BytesIO
 from pathlib import Path
 
@@ -186,7 +187,12 @@ def _analyze_zip(file_bytes: bytes) -> tuple[int, int]:
     except zipfile.BadZipFile as e:
         raise ArchiveError(f"Invalid ZIP file: {e}") from e
 
-    bad_member = zf.testzip()
+    bad_member = None
+    try:
+        bad_member = zf.testzip()
+    except (zipfile.BadZipFile, zlib.error) as e:
+        zf.close()
+        raise ArchiveError(f"Invalid or corrupt ZIP file: {e}") from e
     if bad_member is not None:
         zf.close()
         raise ArchiveError(f"Corrupt file inside archive: {bad_member}")
