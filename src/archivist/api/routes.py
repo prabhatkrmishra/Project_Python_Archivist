@@ -16,7 +16,7 @@ import time
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 
 from archivist.config import get_settings
 from archivist.ingestion.extractors import iter_files, normalize_for_display
@@ -36,10 +36,15 @@ from .schemas import (
     SearchResponse,
     StatusResponse,
 )
+from .security import require_api_key
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/v1", tags=["archivist"])
+router = APIRouter(
+    prefix="/api/v1",
+    tags=["archivist"],
+    dependencies=[Depends(require_api_key)],
+)
 settings = get_settings()
 
 

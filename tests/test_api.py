@@ -100,6 +100,36 @@ class TestHealth:
         assert "backend" in r.json()
 
 
+# ── API key auth ──────────────────────────────────────────────────────────────
+
+
+class TestApiKeyAuth:
+    async def test_api_key_required_when_configured(
+        self, app, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        secured = Settings(data_dir=tmp_path, api_key="secret-key")
+        import archivist.api.security as security
+
+        # Depends() captures a direct reference to the function, so module
+        # monkeypatching won't work - dependency_overrides is the supported way.
+        app.dependency_overrides[security.get_settings] = lambda: secured
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            # No key -> rejected
+            r = await c.get("/api/v1/status")
+            assert r.status_code == 401
+            # Wrong key -> rejected
+            r = await c.get("/api/v1/status", headers={"X-API-Key": "nope"})
+            assert r.status_code == 401
+            # Correct key -> allowed
+            r = await c.get("/api/v1/status", headers={"X-API-Key": "secret-key"})
+            assert r.status_code == 200
+            # Health endpoint stays open (not part of the router)
+            r = await c.get("/health")
+            assert r.status_code == 200
+
+
 # ── Status ────────────────────────────────────────────────────────────────────
 
 

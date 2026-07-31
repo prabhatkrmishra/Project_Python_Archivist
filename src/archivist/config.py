@@ -30,6 +30,7 @@ class Settings(BaseSettings):
         api_port: FastAPI server port.
         api_workers: Number of Uvicorn workers.
         api_key: API authentication key (None = no auth).
+        cors_origins: Comma-separated list of allowed CORS origins.
         data_dir: Storage directory for SQLite database and tracker.
     """
 
@@ -54,6 +55,7 @@ class Settings(BaseSettings):
     api_key: str | None = None  # None = no authentication
     api_max_upload_mb: int = 50  # Max upload size in MB
     api_max_archive_files: int = 5000  # Max files per archive
+    cors_origins: str = "*"  # Comma-separated list, or "*" for all (local dev)
 
     # Storage Paths
     data_dir: Path = Path.home() / ".local" / "share" / "archivist"
