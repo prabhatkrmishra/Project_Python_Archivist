@@ -267,7 +267,15 @@ def _analyze_rar(file_bytes: bytes) -> tuple[int, int]:
         except rarfile.Error as e:
             raise ArchiveError(f"Invalid RAR file: {e}") from e
 
-        bad_member = rf.testrar()
+        try:
+            bad_member = rf.testrar()
+        except rarfile.Error as e:
+            # rarfile 4.x raises BadRarFile for a corrupt member instead of
+            # returning its name. Convert it so the API can report a clean
+            # invalid result rather than an unhandled 500.
+            rf.close()
+            raise ArchiveError(f"Corrupt file inside archive: {e}") from e
+
         if bad_member is not None:
             rf.close()
             raise ArchiveError(f"Corrupt file inside archive: {bad_member}")
