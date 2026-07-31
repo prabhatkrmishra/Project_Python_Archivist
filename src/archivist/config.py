@@ -20,8 +20,6 @@ class Settings(BaseSettings):
     ARCHIVIST_ (e.g., ARCHIVIST_DATA_DIR).
 
     Attributes:
-        vectorizer_n_features: HashingVectorizer feature dimensions (2^20).
-        vectorizer_norm: Vector normalization type (l2 recommended).
         ingest_batch_size: Batch size for ingestion operations.
         ingest_workers: Number of parallel ingestion workers.
         ingest_recursive: Recursively scan directories.
@@ -40,10 +38,6 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
-
-    # Vectorizer Configuration
-    vectorizer_n_features: int = 1_048_576  # 2^20 dimensions
-    vectorizer_norm: str = "l2"
 
     # Ingestion Configuration
     ingest_batch_size: int = 100
